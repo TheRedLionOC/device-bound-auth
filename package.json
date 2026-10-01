@@ -1,0 +1,47 @@
+{
+  "name": "device-bound-auth",
+  "version": "1.0.0",
+  "description": "Username/password auth with device-bound sessions for an API and a browser app. Cloudflare Workers + D1 or Bun (SQLite, PostgreSQL, MySQL).",
+  "license": "MIT",
+  "author": "TheRedLionOC",
+  "repository": "github:TheRedLionOC/device-bound-auth",
+  "homepage": "https://github.com/TheRedLionOC/device-bound-auth#readme",
+  "type": "module",
+  "exports": {
+    "./server": "./server/index.js",
+    "./server/adapters/d1": "./server/adapters/d1.js",
+    "./server/adapters/bun-sql": "./server/adapters/bun-sql.js",
+    "./server/rate-limits/cloudflare": "./server/rate-limits/cloudflare.js",
+    "./server/rate-limits/memory": "./server/rate-limits/memory.js",
+    "./browser": "./browser/index.js",
+    "./schema/*": "./schema/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "server",
+    "browser",
+    "schema",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "jose": "^6.2.12"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "auth",
+    "sessions",
+    "device-bound",
+    "dpop",
+    "jwt",
+    "cloudflare-workers",
+    "d1",
+    "bun"
+  ]
+}

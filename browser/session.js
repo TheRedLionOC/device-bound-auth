@@ -1,0 +1,74 @@
+/**
+ * Session lifecycle: login, token refresh, expiry and logout.
+ * Project-specific behaviour comes from configureAuth() (config.js).
+ */
+import { api } from './api.js';
+import { authConfig } from './config.js';
+import { createDeviceKey } from './device-key.js';
+import { clearAuth, readSession, writeDeviceKey, writeSession } from './store.js';
+
+/** { token, issuedAt, user } or null. */
+export function getSession() {
+  return readSession();
+}
+
+/**
+ * Logs in with a new device key: the session only accepts requests signed by
+ * this browser's private key, which never leaves the device.
+ */
+export async function login(username, password) {
+  const { privateKey, publicJwk } = await createDeviceKey();
+  const { token, user } = await api(`${authConfig().authPath}/login`, {
+    method: 'POST',
+    body: { username, password, public_key: publicJwk },
+  });
+
+  // Local data belongs to one user (and scope): start clean when that changes.
+  const previous = (await readSession())?.user;
+  if (previous && !authConfig().sameScope(previous, user)) await authConfig().onReset();
+
+  await writeDeviceKey({ privateKey });
+  await writeSession({ token, issuedAt: Date.now(), user });
+  return user;
+}
+
+/** Exchanges the token for a new one when older than refreshAfterMs. Needs a connection. */
+export async function refreshTokenIfNeeded() {
+  const session = await readSession();
+  if (!session?.token || Date.now() - (session.issuedAt ?? 0) < authConfig().refreshAfterMs) return;
+
+  const { token, user } = await api(`${authConfig().authPath}/refresh`, { method: 'POST' });
+  await writeSession({ token, issuedAt: Date.now(), user });
+}
+
+/**
+ * Called when the API rejects the session.
+ *  - Expired (timed out): keep the user and local data, only drop the token, so the
+ *    same user can log in again and their unsynced changes are still sent.
+ *  - Revoked (logout elsewhere, closed by an admin, password/role change, user
+ *    deactivated): delete everything on this device, since that is why it was closed.
+ */
+export async function endSession({ revoked }) {
+  if (revoked) {
+    await Promise.all([clearAuth(), authConfig().onReset()]);
+    return;
+  }
+  const session = await readSession();
+  if (session) await writeSession({ ...session, token: null });
+}
+
+/**
+ * Revokes the session on the server (so a copied token stops working) and
+ * deletes the session and all local data. Offline, only the local part is done;
+ * the server session becomes unusable anyway because the device key is deleted.
+ */
+export async function logout() {
+  if (navigator.onLine) {
+    try {
+      await api(`${authConfig().authPath}/logout`, { method: 'POST' });
+    } catch {
+      // Still log out locally; an admin can revoke the session from the Users screen.
+    }
+  }
+  await Promise.all([clearAuth(), authConfig().onReset()]);
+}

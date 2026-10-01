@@ -1,0 +1,267 @@
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { createDeviceKey } from '../browser/device-key.js';
+import { memoryRateLimit } from '../server/rate-limits/memory.js';
+import { configureAuth, statement } from '../server/index.js';
+import { DATABASE_URL, client, createDatabase, insertUser, newIp, startServer } from './harness.js';
+
+const ADMIN_PASSWORD = 'Admin12345';
+let database;
+let server;
+let api;
+let admin; // { token, key }
+let adminId;
+const unique = () => `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+beforeAll(async () => {
+  database = await createDatabase();
+  configureAuth({
+    database: () => database.db,
+    jwtSecret: () => 'test-secret-0123456789abcdef',
+    loginRateLimit: memoryRateLimit({ clientIp: ({ env }) => env.CLIENT_IP }),
+    roles: ['user', 'admin'],
+    access: { any: ['user', 'admin'], admin: ['admin'] },
+    passwords: { iterations: 200_000 },
+  });
+  // Created with fewer iterations than the configured ones: must keep working.
+  adminId = await insertUser(database.db, { username: 'admin', password: ADMIN_PASSWORD, iterations: 100_000 });
+  server = startServer();
+  api = client(server.url);
+  admin = (await api.login('admin', ADMIN_PASSWORD)).auth;
+});
+
+afterAll(async () => {
+  server?.stop();
+  await database?.sql.close();
+});
+
+console.log(`database: ${DATABASE_URL.replace(/:[^:@/]+@/, ':***@')}`);
+
+describe('login', () => {
+  test('valid credentials return a token and the user', async () => {
+    const res = await api.login('admin', ADMIN_PASSWORD);
+    expect(res.status).toBe(200);
+    expect(res.data.user).toMatchObject({ username: 'admin', role: 'admin' });
+  });
+
+  test('username is case-insensitive', async () => {
+    expect((await api.login('ADMIN', ADMIN_PASSWORD)).status).toBe(200);
+  });
+
+  test('wrong password and unknown user get the same 401', async () => {
+    const wrong = await api.login('admin', 'nope-nope');
+    const unknown = await api.login(unique(), 'nope-nope');
+    expect(wrong.status).toBe(401);
+    expect(unknown.status).toBe(401);
+    expect(wrong.data.error).toBe(unknown.data.error);
+  });
+
+  test('a device public key is required', async () => {
+    const res = await api.call('/auth/login', {
+      method: 'POST',
+      ip: newIp(),
+      body: { username: 'admin', password: ADMIN_PASSWORD },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test('legacy hashes without a stored iteration count still verify', async () => {
+    const username = unique();
+    const id = await insertUser(database.db, { username, password: 'Password1', iterations: 100_000 });
+    await database.db.run(
+      statement("UPDATE users SET password_salt = SUBSTR(password_salt, 8) WHERE id = ?", id), // drop "100000$"
+    );
+    expect((await api.login(username, 'Password1')).status).toBe(200);
+  });
+
+  test('every response carries X-Server-Time', async () => {
+    const res = await api.call('/auth/me');
+    expect(Number(res.headers.get('X-Server-Time'))).toBeGreaterThan(0);
+  });
+});
+
+describe('signed requests (device binding)', () => {
+  test('a signed request works', async () => {
+    const res = await api.call('/auth/me', { auth: admin });
+    expect(res.status).toBe(200);
+    expect(res.data.user.username).toBe('admin');
+  });
+
+  test('a token without a signature is rejected', async () => {
+    const res = await fetch(`${server.url}/auth/me`, { headers: { Authorization: `Bearer ${admin.token}` } });
+    expect(res.status).toBe(401);
+  });
+
+  test('a token signed by another device is rejected', async () => {
+    const { privateKey } = await createDeviceKey();
+    const res = await api.call('/auth/me', { auth: { token: admin.token, key: privateKey } });
+    expect(res.status).toBe(401);
+  });
+
+  test('a body changed after signing is rejected', async () => {
+    const res = await api.call('/users', {
+      method: 'POST',
+      auth: admin,
+      body: { username: unique(), name: 'x', password: 'Password1' },
+      rawBody: JSON.stringify({ username: unique(), name: 'x', password: 'Password1', role: 'admin' }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test('an old signature (replay) is rejected with clock_skew', async () => {
+    const res = await api.call('/auth/me', { auth: admin, timestamp: Date.now() - 10 * 60 * 1000 });
+    expect(res.status).toBe(401);
+    expect(res.data.details.code).toBe('clock_skew');
+  });
+
+  test('a forged token is rejected as revoked', async () => {
+    const res = await api.call('/auth/me', { auth: { ...admin, token: `${admin.token}x` } });
+    expect(res.status).toBe(401);
+    expect(res.data.details.code).toBe('session_revoked');
+  });
+});
+
+describe('sessions', () => {
+  test('refresh returns a new working token', async () => {
+    const { auth } = await api.login('admin', ADMIN_PASSWORD);
+    const res = await api.call('/auth/refresh', { method: 'POST', auth });
+    expect(res.status).toBe(200);
+    expect((await api.call('/auth/me', { auth: { ...auth, token: res.data.token } })).status).toBe(200);
+  });
+
+  test('logout revokes the session', async () => {
+    const { auth } = await api.login('admin', ADMIN_PASSWORD);
+    expect((await api.call('/auth/logout', { method: 'POST', auth })).status).toBe(200);
+    const res = await api.call('/auth/me', { auth });
+    expect(res.status).toBe(401);
+    expect(res.data.details.code).toBe('session_revoked');
+  });
+});
+
+describe('user administration', () => {
+  test('validation errors', async () => {
+    const create = (body) => api.call('/users', { method: 'POST', auth: admin, body });
+    expect((await create({ username: '', name: 'x', password: 'Password1' })).data.error).toBe(
+      'Invalid data: username is required',
+    );
+    expect((await create({ username: unique(), name: 'x', password: 'Password1', role: 'boss' })).status).toBe(400);
+    expect((await create({ username: unique(), name: 'x', password: 'short' })).status).toBe(400);
+    expect((await create({ username: unique(), name: 'x', password: 'Password1', active: 'maybe' })).status).toBe(400);
+  });
+
+  test('create, duplicate, update, sessions, delete', async () => {
+    const username = unique();
+    let res = await api.call('/users', {
+      method: 'POST',
+      auth: admin,
+      body: { username: `  ${username} `, name: 'User', password: 'Password1' },
+    });
+    expect(res.status).toBe(201);
+    expect(res.data.user).toMatchObject({ username, role: 'user', active: 1 });
+    const id = res.data.user.id;
+
+    res = await api.call('/users', { method: 'POST', auth: admin, body: { username, name: 'Again', password: 'Password1' } });
+    expect(res.status).toBe(409);
+    expect(res.data.details.code).toBe('duplicate');
+
+    const user = await api.login(username, 'Password1');
+    expect(user.status).toBe(200);
+    expect((await api.call('/users', { auth: user.auth })).status).toBe(403); // not admin
+
+    res = await api.call(`/users/${id}/sessions`, { auth: admin });
+    expect(res.data.sessions).toHaveLength(1);
+    expect(typeof res.data.sessions[0].created_at).toBe('number');
+
+    res = await api.call(`/users/${id}`, {
+      method: 'PUT',
+      auth: admin,
+      body: { username, name: 'Renamed', role: 'user', password: 'Password2' },
+    });
+    expect(res.data.user.name).toBe('Renamed');
+    expect((await api.call('/auth/me', { auth: user.auth })).status).toBe(401); // password change closes sessions
+    expect((await api.login(username, 'Password2')).status).toBe(200);
+
+    expect((await api.call(`/users/${id}`, { method: 'DELETE', auth: admin })).status).toBe(200);
+    expect((await api.login(username, 'Password2')).status).toBe(401);
+    res = await api.call('/users', { method: 'POST', auth: admin, body: { username, name: 'Reuse', password: 'Password1' } });
+    expect(res.status).toBe(201); // username freed
+  });
+
+  test('revoking one session and all sessions', async () => {
+    const username = unique();
+    const { data } = await api.call('/users', {
+      method: 'POST',
+      auth: admin,
+      body: { username, name: 'User', password: 'Password1' },
+    });
+    const id = data.user.id;
+    const first = await api.login(username, 'Password1');
+    const second = await api.login(username, 'Password1');
+
+    const { data: list } = await api.call(`/users/${id}/sessions`, { auth: admin });
+    expect(list.sessions).toHaveLength(2);
+    expect((await api.call(`/users/${id}/sessions/${list.sessions[0].id}/revoke`, { method: 'POST', auth: admin })).status).toBe(200);
+    expect((await api.call(`/users/${id}/sessions/not-a-session/revoke`, { method: 'POST', auth: admin })).status).toBe(404);
+
+    expect((await api.call(`/users/${id}/sessions/revoke`, { method: 'POST', auth: admin })).status).toBe(200);
+    expect((await api.call('/auth/me', { auth: first.auth })).status).toBe(401);
+    expect((await api.call('/auth/me', { auth: second.auth })).status).toBe(401);
+  });
+
+  test('deactivating a user closes their sessions', async () => {
+    const username = unique();
+    const { data } = await api.call('/users', {
+      method: 'POST',
+      auth: admin,
+      body: { username, name: 'User', password: 'Password1' },
+    });
+    const user = await api.login(username, 'Password1');
+    await api.call(`/users/${data.user.id}`, { method: 'PUT', auth: admin, body: { username, name: 'User', active: 0 } });
+    const res = await api.call('/auth/me', { auth: user.auth });
+    expect(res.status).toBe(401);
+    expect(res.data.details.code).toBe('session_revoked');
+    expect((await api.login(username, 'Password1')).status).toBe(401);
+  });
+
+  test('an admin cannot remove their own access or delete themselves', async () => {
+    const own = await api.call(`/users/${adminId}`, {
+      method: 'PUT',
+      auth: admin,
+      body: { username: 'admin', name: 'admin', role: 'user' },
+    });
+    expect(own.status).toBe(400);
+    expect((await api.call(`/users/${adminId}`, { method: 'DELETE', auth: admin })).status).toBe(400);
+  });
+
+  test('deleted usernames fit with the maximum length', async () => {
+    const username = unique().padEnd(50, 'x');
+    const { data } = await api.call('/users', {
+      method: 'POST',
+      auth: admin,
+      body: { username, name: 'Long', password: 'Password1' },
+    });
+    expect((await api.call(`/users/${data.user.id}`, { method: 'DELETE', auth: admin })).status).toBe(200);
+  });
+
+  test('new hashes store the configured iteration count', async () => {
+    const username = unique();
+    await api.call('/users', { method: 'POST', auth: admin, body: { username, name: 'x', password: 'Password1' } });
+    const row = await database.db.first(statement('SELECT password_salt FROM users WHERE username = ?', username));
+    expect(row.password_salt.startsWith('200000$')).toBe(true);
+  });
+});
+
+describe('rate limiting', () => {
+  test('the 6th attempt for a username from one IP is refused', async () => {
+    const ip = newIp();
+    const statuses = [];
+    for (let i = 0; i < 6; i++) statuses.push((await api.login('admin', 'wrong-password', { ip })).status);
+    expect(statuses.slice(0, 5)).toEqual([401, 401, 401, 401, 401]);
+    expect(statuses[5]).toBe(429);
+  });
+});
+
+describe('configuration', () => {
+  test('unknown options are rejected', () => {
+    expect(() => configureAuth({ sesions: { ttlDays: 1 } })).toThrow('Unknown auth option');
+  });
+});
