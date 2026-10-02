@@ -1,8 +1,8 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from './runner.js';
 import { createDeviceKey } from '../browser/device-key.js';
 import { memoryRateLimit } from '../server/rate-limits/memory.js';
 import { AuthError, configureAuth, statement } from '../server/index.js';
-import { DATABASE_URL, client, createDatabase, insertUser, newIp, startServer } from './harness.js';
+import { DATABASE_URL, RUNTIME, client, createDatabase, insertUser, newIp, startServer } from './harness.js';
 
 const ADMIN_PASSWORD = 'Admin12345';
 let database;
@@ -24,17 +24,17 @@ beforeAll(async () => {
   });
   // Created with fewer iterations than the configured ones: must keep working.
   adminId = await insertUser(database.db, { username: 'admin', password: ADMIN_PASSWORD, iterations: 100_000 });
-  server = startServer();
+  server = await startServer();
   api = client(server.url);
   admin = (await api.login('admin', ADMIN_PASSWORD)).auth;
 });
 
 afterAll(async () => {
-  server?.stop();
-  await database?.sql.close();
+  await server?.stop();
+  await database?.close();
 });
 
-console.log(`database: ${DATABASE_URL.replace(/:[^:@/]+@/, ':***@')}`);
+console.log(`runtime: ${RUNTIME}, database: ${DATABASE_URL.replace(/:[^:@/]+@/, ':***@')}`);
 
 describe('login', () => {
   test('valid credentials return a token and the user', async () => {

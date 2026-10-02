@@ -1,14 +1,15 @@
 /**
- * Test server: the server module on Bun.serve with Bun.SQL, a minimal router, and a
- * client that signs requests with the browser module's own signing code.
+ * Test server: the server module behind a minimal router, on Bun.serve (Bun) or node:http
+ * through nodeHandler (Node), plus a client that signs requests with the browser module's
+ * own signing code.
  *
  * DATABASE_URL picks the database (default: SQLite in memory). For PostgreSQL/MySQL use an
  * empty test database: its users and sessions tables are dropped and recreated.
+ *   Bun:  Bun.SQL (bun-sql adapter)
+ *   Node: node:sqlite, pg or mysql2 (their adapters)
  */
-import { SQL } from 'bun';
 import { readFileSync } from 'node:fs';
 import { createDeviceKey, signRequest } from '../browser/device-key.js';
-import { bunSqlAdapter } from '../server/adapters/bun-sql.js';
 import {
   AuthError,
   authResponseHeaders,
@@ -17,29 +18,76 @@ import {
   hashPassword,
   registerAuthRoutes,
   registerUserRoutes,
+  statement,
 } from '../server/index.js';
+import { isBun } from './runner.js';
 
 export const DATABASE_URL = process.env.DATABASE_URL ?? 'sqlite://:memory:';
+export const RUNTIME = isBun ? 'bun' : 'node';
 
-/** Opens the database and creates the module's tables from schema/. */
-export async function createDatabase() {
-  const sql = new SQL(DATABASE_URL);
-  const dialect = sql.options?.adapter ?? 'sqlite';
-  const file = { sqlite: 'sqlite', postgres: 'postgres', mysql: 'mysql' }[dialect];
+const dialectOf = (url) => (url.startsWith('postgres') ? 'postgres' : url.startsWith('mysql') ? 'mysql' : 'sqlite');
+
+function schemaStatements(dialect) {
   const schema =
     'DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS users;' +
-    readFileSync(new URL(`../schema/${file}.sql`, import.meta.url), 'utf8');
-  for (const part of schema.replace(/^--.*$/gm, '').split(';')) {
-    if (part.trim()) await sql.unsafe(part);
+    readFileSync(new URL(`../schema/${dialect}.sql`, import.meta.url), 'utf8');
+  return schema
+    .replace(/^--.*$/gm, '')
+    .split(';')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/** Opens the database with the adapter for this runtime and creates the module's tables. */
+export async function createDatabase() {
+  const dialect = dialectOf(DATABASE_URL);
+  const statements = schemaStatements(dialect);
+
+  if (isBun) {
+    const { SQL } = await import('bun');
+    const { bunSqlAdapter } = await import('../server/adapters/bun-sql.js');
+    const sql = new SQL(DATABASE_URL);
+    for (const part of statements) await sql.unsafe(part);
+    return { db: bunSqlAdapter(sql), dialect, close: () => sql.close() };
   }
-  return { sql, db: bunSqlAdapter(sql), dialect };
+
+  if (dialect === 'sqlite') {
+    const { DatabaseSync } = await import('node:sqlite');
+    const { nodeSqliteAdapter } = await import('../server/adapters/node-sqlite.js');
+    const database = new DatabaseSync(DATABASE_URL.replace(/^sqlite:\/\//, ''));
+    for (const part of statements) database.exec(part);
+    return { db: nodeSqliteAdapter(database), dialect, close: async () => database.close() };
+  }
+
+  if (dialect === 'postgres') {
+    const { default: pg } = await import('pg');
+    const { pgAdapter } = await import('../server/adapters/pg.js');
+    const pool = new pg.Pool({ connectionString: DATABASE_URL });
+    for (const part of statements) await pool.query(part);
+    return { db: pgAdapter(pool), dialect, close: () => pool.end() };
+  }
+
+  const mysql = await import('mysql2/promise');
+  const { mysql2Adapter } = await import('../server/adapters/mysql2.js');
+  const url = new URL(DATABASE_URL);
+  const pool = mysql.createPool({
+    host: url.hostname,
+    port: Number(url.port || 3306),
+    user: decodeURIComponent(url.username),
+    password: decodeURIComponent(url.password),
+    database: url.pathname.slice(1),
+    // MySQL 8 uses a self-signed certificate; TLS is needed by its default authentication.
+    ssl: url.searchParams.get('ssl') === 'require' ? { rejectUnauthorized: false } : undefined,
+  });
+  for (const part of statements) await pool.query(part);
+  return { db: mysql2Adapter(pool), dialect, close: () => pool.end() };
 }
 
 /** Inserts a user directly (like a project's create-admin script). */
 export async function insertUser(db, { username, password, role = 'admin', iterations }) {
   const { hash, salt } = await hashPassword(password, iterations);
   const id = crypto.randomUUID();
-  const { statement } = await import('../server/index.js');
+  const now = Date.now();
   await db.run(
     statement(
       `INSERT INTO users (id, username, name, password_hash, password_salt, role, active, created_at, updated_at)
@@ -50,8 +98,8 @@ export async function insertUser(db, { username, password, role = 'admin', itera
       hash,
       salt,
       role,
-      Date.now(),
-      Date.now(),
+      now,
+      now,
     ),
   );
   return id;
@@ -88,39 +136,53 @@ class Router {
   }
 }
 
-/** Starts the server; the client IP comes from the X-Test-IP header (for rate limits). */
-export function startServer() {
-  const router = new Router();
-  registerAuthRoutes(router);
-  registerUserRoutes(router);
+const router = new Router();
+registerAuthRoutes(router);
+registerUserRoutes(router);
 
-  const server = Bun.serve({
-    port: 0,
-    async fetch(request) {
-      const env = { CLIENT_IP: request.headers.get('X-Test-IP') ?? '127.0.0.1' };
-      let response;
-      try {
-        const url = new URL(request.url);
-        const { route, params } = router.match(request.method, url.pathname);
-        if (!route) {
-          response = Response.json({ error: 'Not found' }, { status: 404 });
-        } else {
-          const context = { request, env, url, params, user: null, session: null };
-          if (route.auth !== 'public') {
-            Object.assign(context, await authenticate(request, env));
-            if (!hasAccess(context.user, route.auth)) throw new AuthError(403, 'Forbidden');
-          }
-          response = await route.handler(context);
-        }
-      } catch (err) {
-        if (!(err instanceof AuthError)) throw err;
-        response = Response.json({ error: err.message, details: err.details }, { status: err.status });
+/** The fetch-style handler shared by both runtimes. The client IP comes from X-Test-IP. */
+async function handle(request) {
+  const env = { CLIENT_IP: request.headers.get('X-Test-IP') ?? '127.0.0.1' };
+  let response;
+  try {
+    const url = new URL(request.url);
+    const { route, params } = router.match(request.method, url.pathname);
+    if (!route) {
+      response = Response.json({ error: 'Not found' }, { status: 404 });
+    } else {
+      const context = { request, env, url, params, user: null, session: null };
+      if (route.auth !== 'public') {
+        Object.assign(context, await authenticate(request, env));
+        if (!hasAccess(context.user, route.auth)) throw new AuthError(403, 'Forbidden');
       }
-      for (const [key, value] of Object.entries(authResponseHeaders())) response.headers.set(key, value);
-      return response;
-    },
-  });
-  return { url: `http://localhost:${server.port}`, stop: () => server.stop(true) };
+      response = await route.handler(context);
+    }
+  } catch (err) {
+    if (!(err instanceof AuthError)) throw err;
+    response = Response.json({ error: err.message, details: err.details }, { status: err.status });
+  }
+  for (const [key, value] of Object.entries(authResponseHeaders())) response.headers.set(key, value);
+  return response;
+}
+
+/** Starts the server on a free port: Bun.serve, or node:http through nodeHandler. */
+export async function startServer() {
+  if (isBun) {
+    const server = Bun.serve({ port: 0, fetch: handle });
+    return { url: `http://localhost:${server.port}`, stop: async () => server.stop(true) };
+  }
+  const { createServer } = await import('node:http');
+  const { nodeHandler } = await import('../server/http/node.js');
+  const server = createServer(nodeHandler(handle));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    url: `http://127.0.0.1:${server.address().port}`,
+    stop: () =>
+      new Promise((resolve) => {
+        server.closeAllConnections();
+        server.close(resolve);
+      }),
+  };
 }
 
 let ipCounter = 0;

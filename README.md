@@ -1,7 +1,7 @@
 # device-bound-auth
 
 Username/password login with **device-bound sessions**, for an API plus a browser app.
-Runs on Cloudflare Workers (D1) or Bun (SQLite, PostgreSQL, MySQL).
+Runs on Cloudflare Workers (D1), Bun or Node, with SQLite, PostgreSQL or MySQL.
 
 | Side | Import | Dependencies |
 | --- | --- | --- |
@@ -14,7 +14,7 @@ Everything project-specific is an option of `configureAuth()`; only the database
 ## Install
 
 ```sh
-npm install github:TheRedLionOC/device-bound-auth#v1.2.0
+npm install github:TheRedLionOC/device-bound-auth#v1.3.0
 ```
 
 The server side is imported from your Worker or Bun code. The browser side is plain ES
@@ -97,6 +97,52 @@ Bun.serve({
 Tables: `schema/sqlite.sql`, `schema/postgres.sql` or `schema/mysql.sql`. MySQL 8 needs
 TLS in the URL (`mysql://user:pass@host/db?ssl=require`).
 
+### Server: Node (node:http or Express)
+
+The module works with standard `Request`/`Response`. On Node, `nodeHandler` converts
+between those and Node's HTTP server (also Express), and you pick the database adapter for
+the driver you use. The library depends on none of them: install only your driver.
+
+| Database | Driver | Adapter |
+| --- | --- | --- |
+| SQLite | `node:sqlite` (built into Node 22.5+) | `device-bound-auth/server/adapters/node-sqlite` |
+| PostgreSQL | `pg` | `device-bound-auth/server/adapters/pg` |
+| MySQL | `mysql2` (`mysql2/promise` pool) | `device-bound-auth/server/adapters/mysql2` |
+
+```js
+import { createServer } from 'node:http';
+import pg from 'pg';
+import { configureAuth } from 'device-bound-auth/server';
+import { pgAdapter } from 'device-bound-auth/server/adapters/pg';
+import { memoryRateLimit } from 'device-bound-auth/server/rate-limits/memory';
+import { nodeHandler } from 'device-bound-auth/server/http/node';
+
+const db = pgAdapter(new pg.Pool({ connectionString: process.env.DATABASE_URL })); // once
+configureAuth({
+  database: () => db,
+  jwtSecret: () => process.env.JWT_SECRET,
+  loginRateLimit: memoryRateLimit({ clientIp: ({ env }) => env.CLIENT_IP }),
+  passwords: { iterations: 600_000 },
+});
+
+// handle(request, env) is your fetch-style router (see "What the project's server must provide")
+createServer(nodeHandler((request, req) => handle(request, { CLIENT_IP: req.socket.remoteAddress })))
+  .listen(3000);
+```
+
+**Express:** mount it on a path, **before** `express.json()` or any body parser:
+
+```js
+app.use('/api', nodeHandler((request, req) => handle(request, { CLIENT_IP: req.ip })));
+app.use(express.json()); // your other routes
+```
+
+Signed requests cover the exact body bytes; if a parser already read the body,
+`nodeHandler` throws an error saying so. Behind a proxy, pass `nodeHandler(fn, { trustProxy:
+true })` so `X-Forwarded-Proto` is honored, and take the client IP from your proxy's header.
+`node:sqlite` is synchronous, which is normal for SQLite (it runs in-process; the module's
+queries take microseconds); use `pg` or `mysql2` for heavy concurrent workloads.
+
 ### Browser
 
 ```js
@@ -136,7 +182,7 @@ const { users } = await api('/users');
 
 | Option | Default | |
 | --- | --- | --- |
-| `database` | — (required) | `(env) => adapter`: `d1Adapter(env.DB)` or `bunSqlAdapter(sql)` |
+| `database` | — (required) | `(env) => adapter`: `d1Adapter(env.DB)`, `bunSqlAdapter(sql)`, `nodeSqliteAdapter(db)`, `pgAdapter(pool)` or `mysql2Adapter(pool)` |
 | `jwtSecret` | `(env) => env.JWT_SECRET` | Changing the secret logs everyone out |
 | `loginRateLimit` | `null` (no limit) | `cloudflareRateLimit()`, `memoryRateLimit()` or your own `async ({ request, env, username }) => {}` that throws |
 | `roles` | `['admin', 'user']` | First one is the default for new users |
@@ -258,22 +304,24 @@ const { hash, salt } = await hashPassword('a-strong-password');
 ## Tests
 
 ```sh
-npm install                                # bun runs the tests
-bun test                                   # SQLite in memory
-DATABASE_URL=postgres://... bun test       # or mysql://...?ssl=require (empty test database:
+npm install
+npm test                                   # Bun: Bun.serve + Bun.SQL
+npm run test:node                          # Node: node:http + nodeHandler + node:sqlite/pg/mysql2
+DATABASE_URL=postgres://... npm test       # or mysql://...?ssl=require (empty test database:
                                            # its users and sessions tables are recreated)
 ```
 
-The suite runs the server module on Bun with the browser module's signing code and checks
-login, signed requests, device binding, replay window, revocation, password changes, user
-administration and rate limiting. GitHub Actions (`.github/workflows/test.yml`) runs it
-against SQLite, PostgreSQL and MySQL on every push and pull request, including Dependabot's
-weekly updates of `jose`.
+The same suite runs on both runtimes with the browser module's signing code and checks
+login, signed requests, device binding, replay window, revocation, password changes,
+sign-up, user administration and rate limiting. GitHub Actions (`.github/workflows/test.yml`)
+runs it on Bun and Node against SQLite, PostgreSQL and MySQL (6 combinations) on every push
+and pull request, including Dependabot's weekly updates of `jose`.
 
 ## Tested with
 
-Cloudflare Workers + D1, and Bun with SQLite, PostgreSQL 18 and MySQL 8.0. The browser
-module with Chrome, Firefox and Brave.
+Cloudflare Workers + D1; Bun (Bun.SQL) and Node 24 (node:sqlite, pg, mysql2, node:http and
+Express) with SQLite, PostgreSQL 18 and MySQL 8.0. The browser module with Chrome, Firefox
+and Brave.
 
 ## License
 

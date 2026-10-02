@@ -4,6 +4,15 @@ All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org): a major version for breaking changes, a minor
 version for new options or features, a patch version for fixes.
 
+## 1.3.0 — 2026-10-01
+
+- Node support. Database adapters for `node:sqlite`, `pg` and `mysql2` (the project installs
+  its own driver; the library still depends only on `jose`), and `nodeHandler` to run the
+  fetch-style handlers on `node:http` or Express. It refuses a body already consumed by a
+  parser (signed requests need the exact bytes).
+- The test suite runs on Bun and Node (`npm test`, `npm run test:node`); GitHub Actions runs
+  both runtimes against SQLite, PostgreSQL and MySQL.
+
 ## 1.2.0 — 2026-10-01
 
 - Optional self sign-up (`signup` options, off by default): `POST /auth/register` and

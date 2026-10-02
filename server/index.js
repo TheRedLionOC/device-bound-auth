@@ -7,7 +7,8 @@
  * Its only dependency is `jose`.
  *   Core (any JavaScript runtime with Web Crypto): the files in this folder
  *   adapters/      database adapters, pick one: d1.js (Cloudflare D1), bun-sql.js (Bun.SQL:
- *                  sqlite://, postgres://, mysql://)
+ *                  sqlite://, postgres://, mysql://), node-sqlite.js, pg.js, mysql2.js (Node)
+ *   http/node.js   runs the fetch-style handlers on node:http or Express
  *   rate-limits/   optional login limits: cloudflare.js (Workers binding), memory.js
  *                  (single long-running server)
  *   ../schema/     users and sessions tables for SQLite/D1, PostgreSQL and MySQL

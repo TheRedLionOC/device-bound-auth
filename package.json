@@ -1,7 +1,7 @@
 {
   "name": "device-bound-auth",
-  "version": "1.2.0",
-  "description": "Username/password auth with device-bound sessions for an API and a browser app. Cloudflare Workers + D1 or Bun (SQLite, PostgreSQL, MySQL).",
+  "version": "1.3.0",
+  "description": "Username/password auth with device-bound sessions for an API and a browser app. Cloudflare Workers + D1, Bun or Node (SQLite, PostgreSQL, MySQL).",
   "license": "MIT",
   "author": "TheRedLionOC",
   "repository": "github:TheRedLionOC/device-bound-auth",
@@ -11,6 +11,10 @@
     "./server": "./server/index.js",
     "./server/adapters/d1": "./server/adapters/d1.js",
     "./server/adapters/bun-sql": "./server/adapters/bun-sql.js",
+    "./server/adapters/node-sqlite": "./server/adapters/node-sqlite.js",
+    "./server/adapters/pg": "./server/adapters/pg.js",
+    "./server/adapters/mysql2": "./server/adapters/mysql2.js",
+    "./server/http/node": "./server/http/node.js",
     "./server/rate-limits/cloudflare": "./server/rate-limits/cloudflare.js",
     "./server/rate-limits/memory": "./server/rate-limits/memory.js",
     "./browser": "./browser/index.js",
@@ -26,7 +30,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "bun test"
+    "test": "bun test",
+    "test:node": "node --test \"test/*.test.js\""
   },
   "dependencies": {
     "jose": "^6.2.12"
@@ -43,5 +48,9 @@
     "cloudflare-workers",
     "d1",
     "bun"
-  ]
+  ],
+  "devDependencies": {
+    "mysql2": "^3.24.5",
+    "pg": "^8.23.1"
+  }
 }

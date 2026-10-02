@@ -1,5 +1,5 @@
-# Runs the test suite on every push and pull request (including Dependabot's), against
-# SQLite, PostgreSQL and MySQL. A release is only tagged from a green commit.
+# Runs the test suite on every push and pull request (including Dependabot's), on Bun and
+# Node, against SQLite, PostgreSQL and MySQL. A release is only tagged from a green commit.
 name: Tests
 
 on:
@@ -12,11 +12,12 @@ permissions:
 
 jobs:
   test:
-    name: ${{ matrix.database }}
+    name: ${{ matrix.runtime }} + ${{ matrix.database }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        runtime: [bun, node]
         database: [sqlite, postgres, mysql]
 
     services:
@@ -50,7 +51,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: npm ci
       - name: Test
-        run: bun test
+        run: ${{ matrix.runtime == 'bun' && 'npm test' || 'npm run test:node' }}
         env:
           DATABASE_URL: >-
             ${{ matrix.database == 'postgres' && 'postgres://auth_test:auth_test@localhost:5432/auth_test'
