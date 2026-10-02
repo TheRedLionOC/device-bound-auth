@@ -73,6 +73,10 @@ registerUserRoutes(router);   // /users... (admin)
 - Secret: `npx wrangler secret put JWT_SECRET` (a long random string).
 - Rate limit bindings (`wrangler.jsonc`), each optional:
   `"ratelimits": [{ "name": "LOGIN_LIMIT_PER_USER", "namespace_id": "1001", "simple": { "limit": 5, "period": 60 } }, { "name": "LOGIN_LIMIT_PER_IP", "namespace_id": "1002", "simple": { "limit": 20, "period": 60 } }]`
+- Local development: if `wrangler.jsonc` has `routes`, `wrangler dev` shows the Worker the
+  production URL instead of `http://localhost:8787`, so DPoP proofs (signed for the URL the
+  browser called) are refused as made for another URL. Run
+  `wrangler dev --local-upstream localhost:8787` (same port) to keep the real one.
 
 ### Server: Bun (SQLite, PostgreSQL or MySQL, no driver to install)
 
