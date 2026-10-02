@@ -26,19 +26,26 @@ async function listUsers({ env }) {
 }
 
 async function createUser({ request, env }) {
+  const id = await insertUser(env, validateUser(await readJson(request)));
+  return json({ user: await findUser(database(env), id) }, 201);
+}
+
+/**
+ * Creates a user from validated data (see validateUser), running the project's hooks in
+ * the same transaction. Used by the admin route and by self sign-up. Returns the new id.
+ */
+export async function insertUser(env, data) {
   const { hooks } = authConfig();
-  const db = database(env);
-  const data = validateUser(await readJson(request));
   await hooks.validateUserChange(env, { data, previous: null });
   const { hash, salt } = await hashPassword(checkNewPassword(data.password));
   const id = crypto.randomUUID();
   const now = Date.now();
 
-  await store.runBatch(db, [
+  await store.runBatch(database(env), [
     store.insertUserStatement({ id, ...data, passwordHash: hash, passwordSalt: salt }, now),
     ...(await hooks.userStatements(env, { user: { id, ...data }, previous: null, now })),
   ]);
-  return json({ user: await findUser(db, id) }, 201);
+  return id;
 }
 
 async function updateUser({ request, env, params, user: currentUser, session }) {
@@ -128,7 +135,7 @@ async function findUser(db, id) {
 }
 
 /** Validates and normalizes a user from the request body. Unknown fields are dropped. */
-function validateUser(input) {
+export function validateUser(input) {
   const { roles, users } = authConfig();
   const source = input && typeof input === 'object' ? input : {};
   const text = (value) => (typeof value === 'string' ? value.trim() : value);

@@ -43,6 +43,17 @@ const config = {
     // working: each hash stores the iterations it was made with.
     iterations: 100_000,
   },
+  // Self sign-up: POST {authPath}/register lets anyone create an account. Off by default.
+  signup: {
+    enabled: false,
+    // Role of self-registered users. Required when enabled; must not have 'admin' access.
+    role: null,
+    // true: new accounts start inactive and get no session until an admin activates them.
+    requireApproval: false,
+    // async ({ request, env, body }) => void. Throw an AuthError to refuse, e.g. after
+    // checking a CAPTCHA token (Cloudflare Turnstile) sent in the body. null: no check.
+    verify: null,
+  },
   users: {
     usernameMaxLength: 50,
     nameMaxLength: 100,
@@ -70,13 +81,27 @@ const config = {
   },
 };
 
-const GROUPS = ['sessions', 'signatures', 'passwords', 'users', 'hooks'];
+const GROUPS = ['sessions', 'signatures', 'passwords', 'signup', 'users', 'hooks'];
 
+/** Applies the options all at once: if any is invalid, nothing changes. */
 export function configureAuth(options = {}) {
+  const next = { ...config };
   for (const [key, value] of Object.entries(options)) {
     if (!(key in config)) throw new Error(`Unknown auth option "${key}"`);
     if (value === undefined) continue;
-    config[key] = GROUPS.includes(key) ? { ...config[key], ...value } : value;
+    next[key] = GROUPS.includes(key) ? { ...config[key], ...value } : value;
+  }
+  checkSignup(next);
+  Object.assign(config, next);
+}
+
+/** Refuses a sign-up configuration that would hand out unintended (or admin) access. */
+function checkSignup({ signup, roles, access }) {
+  if (!signup.enabled) return;
+  if (!signup.role) throw new Error('signup.role is required when signup.enabled is true');
+  if (!roles.includes(signup.role)) throw new Error(`signup.role "${signup.role}" is not one of roles`);
+  if (access.admin?.includes(signup.role)) {
+    throw new Error(`signup.role "${signup.role}" must not have admin access`);
   }
 }
 

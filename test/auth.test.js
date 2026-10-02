@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { createDeviceKey } from '../browser/device-key.js';
 import { memoryRateLimit } from '../server/rate-limits/memory.js';
-import { configureAuth, statement } from '../server/index.js';
+import { AuthError, configureAuth, statement } from '../server/index.js';
 import { DATABASE_URL, client, createDatabase, insertUser, newIp, startServer } from './harness.js';
 
 const ADMIN_PASSWORD = 'Admin12345';
@@ -134,6 +134,79 @@ describe('sessions', () => {
     const res = await api.call('/auth/me', { auth });
     expect(res.status).toBe(401);
     expect(res.data.details.code).toBe('session_revoked');
+  });
+});
+
+describe('self sign-up', () => {
+  const register = async (body, { ip = newIp() } = {}) => {
+    const { privateKey, publicJwk } = await createDeviceKey();
+    const res = await api.call('/auth/register', { method: 'POST', ip, body: { public_key: publicJwk, ...body } });
+    return { ...res, auth: res.data?.token && { token: res.data.token, key: privateKey } };
+  };
+  const enable = (signup) => configureAuth({ signup: { enabled: true, role: 'user', requireApproval: false, verify: null, ...signup } });
+  afterAll(() => configureAuth({ signup: { enabled: false, requireApproval: false, verify: null } }));
+
+  test('is disabled by default (404)', async () => {
+    expect((await register({ username: unique(), name: 'x', password: 'Password1' })).status).toBe(404);
+  });
+
+  test('unsafe configurations are refused and change nothing', () => {
+    expect(() => configureAuth({ signup: { enabled: true } })).toThrow('signup.role is required');
+    expect(() => configureAuth({ signup: { enabled: true, role: 'admin' } })).toThrow('must not have admin access');
+    expect(() => configureAuth({ signup: { enabled: true, role: 'boss' } })).toThrow('is not one of roles');
+  });
+
+  test('creates the account with the configured role and logs in on this device', async () => {
+    enable();
+    const username = unique();
+    const res = await register({ username, name: 'New person', password: 'Password1', role: 'admin' });
+    expect(res.status).toBe(201);
+    expect(res.data.user).toMatchObject({ username, role: 'user' }); // a role in the body is ignored
+    const me = await api.call('/auth/me', { auth: res.auth });
+    expect(me.status).toBe(200);
+    expect((await api.call('/users', { auth: res.auth })).status).toBe(403);
+
+    const again = await register({ username, name: 'Again', password: 'Password1' });
+    expect(again.status).toBe(409);
+    expect(again.data.details.code).toBe('duplicate');
+    expect((await register({ username: unique(), name: 'x', password: 'short' })).data.details.code).toBe('weak_password');
+    expect((await register({ username: unique(), name: 'x', password: 'Password1', public_key: null })).status).toBe(400);
+  });
+
+  test('requireApproval: inactive until an admin activates it', async () => {
+    enable({ requireApproval: true });
+    const username = unique();
+    const res = await register({ username, name: 'Pending', password: 'Password1' });
+    expect(res.status).toBe(201);
+    expect(res.data).toEqual({ pending: true });
+    expect((await api.login(username, 'Password1')).status).toBe(401);
+
+    const { data } = await api.call('/users', { auth: admin });
+    const user = data.users.find((u) => u.username === username);
+    expect(user.active).toBe(0);
+    await api.call(`/users/${user.id}`, { method: 'PUT', auth: admin, body: { username, name: 'Pending', role: 'user', active: 1 } });
+    expect((await api.login(username, 'Password1')).status).toBe(200);
+  });
+
+  test('the verify hook can refuse (e.g. a CAPTCHA)', async () => {
+    enable({
+      verify: async ({ body }) => {
+        if (body.captcha !== 'ok') throw new AuthError(400, 'CAPTCHA failed', { code: 'captcha' });
+      },
+    });
+    const refused = await register({ username: unique(), name: 'Bot', password: 'Password1' });
+    expect(refused.status).toBe(400);
+    expect(refused.data.details.code).toBe('captcha');
+    expect((await register({ username: unique(), name: 'Human', password: 'Password1', captcha: 'ok' })).status).toBe(201);
+  });
+
+  test('attempts count against the login rate limit', async () => {
+    enable();
+    const ip = newIp();
+    const username = unique();
+    const statuses = [];
+    for (let i = 0; i < 6; i++) statuses.push((await register({ username, name: 'x', password: 'short' }, { ip })).status);
+    expect(statuses[5]).toBe(429);
   });
 });
 

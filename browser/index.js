@@ -18,4 +18,12 @@
  */
 export { ApiError, api } from './api.js';
 export { configureAuth } from './config.js';
-export { changePassword, endSession, getSession, login, logout, refreshTokenIfNeeded } from './session.js';
+export {
+  changePassword,
+  endSession,
+  getSession,
+  login,
+  logout,
+  refreshTokenIfNeeded,
+  register,
+} from './session.js';

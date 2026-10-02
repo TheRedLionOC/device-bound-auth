@@ -12,14 +12,19 @@ import {
   runBatch,
   updatePasswordStatement,
 } from './store.js';
+import { insertUser, validateUser } from './users.js';
 
 // Used to spend the same time hashing when the user does not exist,
 // so response timing does not reveal valid usernames.
 let dummyCredentials;
 
-/** Login, current user, refresh, logout and password change under `prefix` (the browser module's authPath). */
+/**
+ * Login, sign-up, current user, refresh, logout and password change under `prefix`
+ * (the browser module's authPath). Sign-up answers 404 unless signup.enabled.
+ */
 export function registerAuthRoutes(router, { prefix = '/auth' } = {}) {
   router.post(`${prefix}/login`, login, { auth: 'public' });
+  router.post(`${prefix}/register`, register, { auth: 'public' });
   // The rest are available to every logged-in role (router default: 'any').
   router.get(`${prefix}/me`, ({ user }) => json({ user }));
   router.post(`${prefix}/refresh`, refresh);
@@ -46,6 +51,38 @@ async function login({ request, env }) {
 
   const token = await startSession(env, user, request, publicKey);
   return json({ token, user: await loadUser(env, user) });
+}
+
+/**
+ * Self sign-up (configureAuth signup). Creates the user with signup.role and, unless
+ * signup.requireApproval, logs them in on this device like login does. Attempts count
+ * against the login rate limit. Note: a taken username answers 409, so sign-up reveals
+ * which usernames exist (unavoidable when people pick their own).
+ */
+async function register({ request, env }) {
+  const { signup } = authConfig();
+  if (!signup.enabled) throw new AuthError(404, 'Not found');
+
+  const body = await readJson(request);
+  const username = typeof body?.username === 'string' ? body.username : '';
+  await authConfig().loginRateLimit?.({ request, env, username });
+  await signup.verify?.({ request, env, body });
+  // Checked before creating the user, so a bad key does not leave an account behind.
+  const publicKey = signup.requireApproval ? null : await normalizePublicKey(body.public_key);
+
+  const data = validateUser({
+    username: body.username,
+    name: body.name,
+    password: body.password,
+    role: signup.role,
+    active: signup.requireApproval ? 0 : 1,
+  });
+  const id = await insertUser(env, data);
+  if (signup.requireApproval) return json({ pending: true }, 201);
+
+  const user = { id, username: data.username, name: data.name, role: data.role };
+  const token = await startSession(env, user, request, publicKey);
+  return json({ token, user: await loadUser(env, user) }, 201);
 }
 
 /** Extends the current session and returns a new token (sliding expiration). */

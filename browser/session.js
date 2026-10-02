@@ -23,14 +23,36 @@ export async function login(username, password) {
     body: { username, password, public_key: publicJwk },
     auth: false,
   });
+  await startLocalSession(token, user, privateKey);
+  return user;
+}
 
+/**
+ * Creates an account (the server must enable signup) and, unless it needs an admin's
+ * approval, logs in on this device like login(). Returns { user } or { pending: true }.
+ * Errors are ApiError: 404 (sign-up disabled), 409 details.code 'duplicate' (username
+ * taken), 400 (invalid data, details.code 'weak_password'), 429 (rate limit).
+ */
+export async function register({ username, name, password, ...extra }) {
+  const { privateKey, publicJwk } = await createDeviceKey();
+  const result = await api(`${authConfig().authPath}/register`, {
+    method: 'POST',
+    // `extra` reaches the server's signup.verify hook (e.g. a CAPTCHA token).
+    body: { ...extra, username, name, password, public_key: publicJwk },
+    auth: false,
+  });
+  if (result.pending) return { pending: true };
+  await startLocalSession(result.token, result.user, privateKey);
+  return { user: result.user };
+}
+
+async function startLocalSession(token, user, privateKey) {
   // Local data belongs to one user (and scope): start clean when that changes.
   const previous = (await readSession())?.user;
   if (previous && !authConfig().sameScope(previous, user)) await authConfig().onReset();
 
   await writeDeviceKey({ privateKey });
   await writeSession({ token, issuedAt: Date.now(), user });
-  return user;
 }
 
 /** Exchanges the token for a new one when older than refreshAfterMs. Needs a connection. */

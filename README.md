@@ -14,7 +14,7 @@ Everything project-specific is an option of `configureAuth()`; only the database
 ## Install
 
 ```sh
-npm install github:TheRedLionOC/device-bound-auth#v1.1.0
+npm install github:TheRedLionOC/device-bound-auth#v1.2.0
 ```
 
 The server side is imported from your Worker or Bun code. The browser side is plain ES
@@ -38,6 +38,9 @@ time and import it from there.
   log in again) or `session_revoked` (closed on purpose: delete local data).
 - **User administration** (role `admin`): list, create, update, soft delete, list and
   revoke sessions. Deleted users keep their row (history) and free their username.
+- **Users change their own password** (current one required; other sessions closed).
+- **Optional self sign-up**, off by default, with a fixed non-admin role, optional admin
+  approval and a hook for CAPTCHAs.
 - **Login rate limiting** (optional, pluggable) and constant-time login responses, so
   timing does not reveal which usernames exist.
 
@@ -58,7 +61,7 @@ configureAuth({
   loginRateLimit: cloudflareRateLimit(), // optional; bindings in wrangler.jsonc
 });
 
-registerAuthRoutes(router);   // /auth/login, /me, /refresh, /logout, /password
+registerAuthRoutes(router);   // /auth/login, /register, /me, /refresh, /logout, /password
 registerUserRoutes(router);   // /users... (admin)
 ```
 
@@ -146,9 +149,32 @@ const { users } = await api('/users');
 | `passwords.iterations` | `100000` | Maximum on Cloudflare Workers; OWASP recommends 600,000 elsewhere |
 | `users.usernameMaxLength` / `nameMaxLength` | `50` / `100` | |
 | `users.deletedUsername` | `"name (deleted 2026-01-31 #abcd)"` | New username of a deleted user |
+| `signup.enabled` | `false` | Allow self sign-up (`POST /auth/register`); otherwise it answers 404 |
+| `signup.role` | — (required when enabled) | Role of new accounts. Must be in `roles` and must not have `admin` access (checked at startup) |
+| `signup.requireApproval` | `false` | New accounts start inactive, with no session, until an admin activates them |
+| `signup.verify` | `null` | `async ({ request, env, body }) => {}`: throw an `AuthError` to refuse (e.g. check a CAPTCHA token sent in the body) |
 | `hooks.*` | no-ops | Project side effects, see below |
 
 Groups are merged: `{ sessions: { ttlDays: 7 } }` keeps the other session settings.
+`configureAuth()` applies all options or none: an unknown option or an unsafe sign-up
+setting throws and leaves the previous configuration in place.
+
+### Self sign-up
+
+```js
+configureAuth({
+  signup: {
+    enabled: true,
+    role: 'member',            // never an admin role
+    requireApproval: false,    // true: an admin activates new accounts first
+    verify: async ({ env, body }) => { /* e.g. validate body.captcha with Turnstile */ },
+  },
+});
+```
+
+Attempts count against `loginRateLimit`. A taken username answers 409, so sign-up reveals
+which usernames exist; that is unavoidable when people choose their own. For public sites,
+add a CAPTCHA through `verify`: the rate limit alone does not stop many IPs.
 
 `registerAuthRoutes(router, { prefix: '/auth' })` and
 `registerUserRoutes(router, { prefix: '/users' })` take the route prefix.
@@ -186,6 +212,9 @@ Exports:
   throws `ApiError` with `status` and `details`.
 - `login(username, password)`, `logout()`, `getSession()`, `refreshTokenIfNeeded()`,
   `endSession({ revoked })`.
+- `register({ username, name, password, ...extra })`: self sign-up; logs in on this device
+  and returns `{ user }`, or `{ pending: true }` when an admin must approve. `extra` fields
+  (e.g. `captcha`) reach the server's `signup.verify`.
 - `changePassword(currentPassword, newPassword)`: the server checks the current password
   and closes the user's other sessions; this one stays. Fails with 400 and `details.code`
   `wrong_password` or `weak_password`, or 429 (counts against the login rate limit).
@@ -203,6 +232,7 @@ Events on `window`:
 | Method | Path | |
 | --- | --- | --- |
 | POST | `/auth/login` | `{ username, password, public_key }` → `{ token, user }` (the browser module sends the key) |
+| POST | `/auth/register` | `{ username, name, password, public_key }` → `{ token, user }` or `{ pending: true }` (only with `signup.enabled`) |
 | GET | `/auth/me` | Current user |
 | POST | `/auth/refresh` | New token, extends the session |
 | POST | `/auth/logout` | Revokes the current session |
@@ -215,8 +245,8 @@ Events on `window`:
 
 ## Creating the first admin
 
-There is no sign-up: an admin creates users. Insert the first one directly, hashing the
-password with the same function the server uses:
+Sign-up never creates admins, so insert the first admin directly, hashing the password
+with the same function the server uses:
 
 ```js
 import { hashPassword } from 'device-bound-auth/server';

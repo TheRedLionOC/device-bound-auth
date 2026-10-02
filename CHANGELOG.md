@@ -4,6 +4,13 @@ All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org): a major version for breaking changes, a minor
 version for new options or features, a patch version for fixes.
 
+## 1.2.0 — 2026-10-01
+
+- Optional self sign-up (`signup` options, off by default): `POST /auth/register` and
+  browser `register()`. Fixed non-admin role (checked at startup), optional admin approval,
+  `verify` hook for CAPTCHAs, counted against the login rate limit.
+- `configureAuth()` is atomic: invalid options leave the previous configuration in place.
+
 ## 1.1.0 — 2026-10-01
 
 - New route `POST /auth/password` and browser `changePassword(current, new)`: users change
