@@ -111,7 +111,8 @@ describe('signed requests (device binding)', () => {
   });
 
   test('an old signature (replay) is rejected with clock_skew', async () => {
-    const res = await api.call('/auth/me', { auth: admin, timestamp: Date.now() - 10 * 60 * 1000 });
+    expect((await api.call('/auth/me', { auth: admin, timestamp: Date.now() - 30 * 1000 })).status).toBe(200);
+    const res = await api.call('/auth/me', { auth: admin, timestamp: Date.now() - 2 * 60 * 1000 });
     expect(res.status).toBe(401);
     expect(res.data.details.code).toBe('clock_skew');
   });

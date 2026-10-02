@@ -14,7 +14,7 @@ Everything project-specific is an option of `configureAuth()`; only the database
 ## Install
 
 ```sh
-npm install github:TheRedLionOC/device-bound-auth#v2.0.0
+npm install github:TheRedLionOC/device-bound-auth#v2.1.0
 ```
 
 The server side is imported from your Worker or Bun code. The browser side is plain ES
@@ -198,7 +198,7 @@ const { users } = await api('/users');
 | `sessions.ttlDays` | `30` | Session and token lifetime since the last refresh |
 | `sessions.retentionDays` | `365` | Expired/revoked sessions are deleted after this |
 | `sessions.lastSeenResolutionMs` | 5 min | `last_seen_at` write frequency on reads |
-| `signatures.maxClockSkewMs` | 5 min | Replay window for DPoP proofs (`iat`) |
+| `signatures.maxClockSkewMs` | 60 s | Replay window for DPoP proofs (`iat`). The browser module corrects its clock, so this only covers network delay |
 | `signatures.requireBodyAndQueryHashes` | `true` | Require the `bh` / `qh` extension claims. `false`: also accept plain DPoP proofs from other clients |
 | `signatures.useJti` | `null` | `async ({ jti, expiresAt, env }) => boolean`: `true` the first time a proof id is seen (store it until `expiresAt`); a repeat is refused |
 | `signatures.origin` | request origin | Public origin of the API compared with `htu`, when the server sees another one (proxy) |
@@ -314,7 +314,7 @@ could be replayed (never a modified one, thanks to `bh`/`qh`). To refuse even th
 signatures: {
   useJti: async ({ jti, expiresAt, env }) => {
     if (await env.KV.get(`jti:${jti}`)) return false;
-    await env.KV.put(`jti:${jti}`, '1', { expiration: Math.ceil(expiresAt / 1000) });
+    await env.KV.put(`jti:${jti}`, '1', { expirationTtl: 120 }); // KV's minimum is 60 s
     return true;
   },
 },

@@ -34,8 +34,10 @@ const config = {
   },
   // Device binding with DPoP proofs (RFC 9449, see dpop.js).
   signatures: {
-    // Proofs are accepted this close to the server time (replay window).
-    maxClockSkewMs: 5 * MINUTE_MS,
+    // Proofs are accepted this close to the server time (replay window). The browser module
+    // corrects its clock with X-Server-Time and retries once on clock_skew, so this only has
+    // to cover network delay; raise it for clients without that correction.
+    maxClockSkewMs: MINUTE_MS,
     // Require the bh/qh extension claims (hashes of body and query), so a captured proof
     // cannot be reused with other data. false: also accept plain DPoP proofs from other
     // clients (bh/qh are still checked when present); consider useJti then.

@@ -4,6 +4,14 @@ All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org): a major version for breaking changes, a minor
 version for new options or features, a patch version for fixes.
 
+## 2.1.0 — 2026-10-02
+
+- `signatures.maxClockSkewMs` defaults to 60 s (was 5 min). The browser module corrects its
+  clock with `X-Server-Time` and retries once on `clock_skew`, so the window only has to
+  cover network delay; a shorter window shortens how long a captured proof can be replayed.
+  Raise it for clients without clock correction.
+- README: the Workers KV example for `useJti` uses `expirationTtl` (KV's minimum is 60 s).
+
 ## 2.0.0 — 2026-10-02
 
 **Breaking:** device binding is now standard DPoP and the 1.x format is gone. Every user logs
