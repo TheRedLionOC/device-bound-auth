@@ -137,6 +137,52 @@ describe('sessions', () => {
   });
 });
 
+describe('changing my own password', () => {
+  const change = (auth, body, ip) => api.call('/auth/password', { method: 'POST', auth, body, ip });
+
+  test('needs the current password, keeps this session, closes the others', async () => {
+    const username = unique();
+    await api.call('/users', { method: 'POST', auth: admin, body: { username, name: 'User', password: 'Password1' } });
+    const here = await api.login(username, 'Password1');
+    const elsewhere = await api.login(username, 'Password1');
+
+    let res = await change(here.auth, { current_password: 'wrong-one', new_password: 'Password2' });
+    expect(res.status).toBe(400);
+    expect(res.data.details.code).toBe('wrong_password');
+
+    res = await change(here.auth, { current_password: 'Password1', new_password: 'short' });
+    expect(res.status).toBe(400);
+    expect(res.data.details.code).toBe('weak_password');
+
+    res = await change(here.auth, { current_password: 'Password1', new_password: 'Password2' });
+    expect(res.status).toBe(200);
+    expect((await api.call('/auth/me', { auth: here.auth })).status).toBe(200); // this session stays
+    const other = await api.call('/auth/me', { auth: elsewhere.auth });
+    expect(other.status).toBe(401);
+    expect(other.data.details.code).toBe('session_revoked');
+
+    expect((await api.login(username, 'Password1')).status).toBe(401);
+    expect((await api.login(username, 'Password2')).status).toBe(200);
+  });
+
+  test('requires a session and the current password field', async () => {
+    expect((await api.call('/auth/password', { method: 'POST', body: { current_password: 'x', new_password: 'Password9' } })).status).toBe(401);
+    expect((await change(admin, { new_password: 'Password9' })).status).toBe(400);
+  });
+
+  test('guessing the current password is rate limited', async () => {
+    const username = unique();
+    await api.call('/users', { method: 'POST', auth: admin, body: { username, name: 'User', password: 'Password1' } });
+    const { auth } = await api.login(username, 'Password1');
+    const ip = newIp();
+    const statuses = [];
+    for (let i = 0; i < 6; i++) {
+      statuses.push((await change(auth, { current_password: `guess-${i}`, new_password: 'Password2' }, ip)).status);
+    }
+    expect(statuses[5]).toBe(429);
+  });
+});
+
 describe('user administration', () => {
   test('validation errors', async () => {
     const create = (body) => api.call('/users', { method: 'POST', auth: admin, body });

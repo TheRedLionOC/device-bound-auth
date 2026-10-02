@@ -4,6 +4,17 @@ All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org): a major version for breaking changes, a minor
 version for new options or features, a patch version for fixes.
 
+## 1.1.0 — 2026-10-01
+
+- New route `POST /auth/password` and browser `changePassword(current, new)`: users change
+  their own password (current one required, other sessions closed, rate limited).
+- Browser: a session whose device key is missing ends cleanly (`auth:expired` with
+  `session_expired` and `reason: 'device_key_missing'`) instead of sending unsigned requests.
+- Browser: `api(path, { auth: false })` sends a request without credentials; `login` uses it.
+- Password policy errors carry `details.code: 'weak_password'`.
+- Tests run on GitHub Actions against SQLite, PostgreSQL and MySQL; Dependabot keeps `jose`
+  and the actions up to date.
+
 ## 1.0.0 — 2026-10-01
 
 First release, extracted from the wISP ZAMS inventory app.

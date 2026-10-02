@@ -21,6 +21,7 @@ export async function login(username, password) {
   const { token, user } = await api(`${authConfig().authPath}/login`, {
     method: 'POST',
     body: { username, password, public_key: publicJwk },
+    auth: false,
   });
 
   // Local data belongs to one user (and scope): start clean when that changes.
@@ -39,6 +40,18 @@ export async function refreshTokenIfNeeded() {
 
   const { token, user } = await api(`${authConfig().authPath}/refresh`, { method: 'POST' });
   await writeSession({ token, issuedAt: Date.now(), user });
+}
+
+/**
+ * Changes the logged-in user's own password. The server checks the current one and
+ * closes the user's other sessions; this one stays open. Errors are ApiError with
+ * status 400 and details.code 'wrong_password' or 'weak_password', or 429 (rate limit).
+ */
+export async function changePassword(currentPassword, newPassword) {
+  await api(`${authConfig().authPath}/password`, {
+    method: 'POST',
+    body: { current_password: currentPassword, new_password: newPassword },
+  });
 }
 
 /**

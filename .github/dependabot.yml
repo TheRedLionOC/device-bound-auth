@@ -1,0 +1,13 @@
+# Weekly pull requests updating jose (npm) and the GitHub Actions used by the tests.
+# The Tests workflow runs on each one: merge only when it is green, then tag a patch
+# release (see CHANGELOG.md) so projects can pick the update up.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

@@ -21,18 +21,31 @@ let clockOffsetMs = 0;
 
 /**
  * Calls the API with the session token, signing the request with the device key.
+ * `auth: false` sends it without credentials (e.g. login).
  * Dispatches `auth:expired` on 401, with `detail.code` = 'session_expired' or
  * 'session_revoked' (see server/authenticate.js).
  */
-export async function api(path, { method = 'GET', body } = {}) {
-  let result = await send(path, method, body);
+export async function api(path, { method = 'GET', body, auth = true } = {}) {
+  const [session, deviceKey] = auth ? await Promise.all([readSession(), readDeviceKey()]) : [null, null];
+
+  // A session without its device key (e.g. part of the site data was cleared) cannot sign
+  // requests. End it like an expired one (local data is kept) instead of sending an
+  // unsigned request that fails with a confusing 401.
+  if (session?.token && !deviceKey) {
+    window.dispatchEvent(
+      new CustomEvent('auth:expired', { detail: { code: 'session_expired', reason: 'device_key_missing' } }),
+    );
+    throw new ApiError(401, 'This device lost its session key; log in again', { code: 'device_key_missing' });
+  }
+
+  let result = await send(path, method, body, session, deviceKey);
 
   // The device clock was too far off: retry once with the offset learned from the response.
   if (result.response.status === 401 && result.data?.details?.code === 'clock_skew') {
-    result = await send(path, method, body);
+    result = await send(path, method, body, session, deviceKey);
   }
 
-  const { response, data, session } = result;
+  const { response, data } = result;
   if (!response.ok) {
     if (response.status === 401 && session?.token) {
       window.dispatchEvent(new CustomEvent('auth:expired', { detail: { code: data?.details?.code } }));
@@ -42,8 +55,7 @@ export async function api(path, { method = 'GET', body } = {}) {
   return data;
 }
 
-async function send(path, method, body) {
-  const [session, deviceKey] = await Promise.all([readSession(), readDeviceKey()]);
+async function send(path, method, body, session, deviceKey) {
   const url = new URL(`${authConfig().apiUrl}${path}`);
   const bodyText = body === undefined ? undefined : JSON.stringify(body);
 
@@ -51,13 +63,11 @@ async function send(path, method, body) {
   if (bodyText !== undefined) headers['Content-Type'] = 'application/json';
   if (session?.token) {
     headers.Authorization = `Bearer ${session.token}`;
-    if (deviceKey) {
-      const timestamp = Date.now() + clockOffsetMs;
-      Object.assign(
-        headers,
-        await signRequest(deviceKey.privateKey, method, url.pathname + url.search, bodyText ?? '', timestamp),
-      );
-    }
+    const timestamp = Date.now() + clockOffsetMs;
+    Object.assign(
+      headers,
+      await signRequest(deviceKey.privateKey, method, url.pathname + url.search, bodyText ?? '', timestamp),
+    );
   }
 
   let response;
@@ -71,5 +81,5 @@ async function send(path, method, body) {
   if (serverTime) clockOffsetMs = serverTime - Date.now();
 
   const data = await response.json().catch(() => null);
-  return { response, data, session };
+  return { response, data };
 }

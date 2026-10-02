@@ -146,6 +146,17 @@ export function findLoginUser(db, username) {
   );
 }
 
+/** The password hash of an active user, or null. */
+export function findPasswordHash(db, userId) {
+  return first(
+    db,
+    statement(
+      'SELECT password_hash, password_salt FROM users WHERE id = ? AND active = 1 AND deleted_at IS NULL',
+      userId,
+    ),
+  );
+}
+
 /** A user that is not deleted (public columns only), or null. */
 export function findUser(db, id) {
   return first(db, statement(`SELECT ${PUBLIC_USER_COLUMNS} FROM users WHERE id = ? AND deleted_at IS NULL`, id));

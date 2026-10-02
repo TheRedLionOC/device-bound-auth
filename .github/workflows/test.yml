@@ -1,0 +1,58 @@
+# Runs the test suite on every push and pull request (including Dependabot's), against
+# SQLite, PostgreSQL and MySQL. A release is only tagged from a green commit.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.database }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        database: [sqlite, postgres, mysql]
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: auth_test
+          POSTGRES_PASSWORD: auth_test
+          POSTGRES_DB: auth_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U auth_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: auth_test
+          MYSQL_USER: auth_test
+          MYSQL_PASSWORD: auth_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - uses: oven-sh/setup-bun@v2
+      - run: npm ci
+      - name: Test
+        run: bun test
+        env:
+          DATABASE_URL: >-
+            ${{ matrix.database == 'postgres' && 'postgres://auth_test:auth_test@localhost:5432/auth_test'
+            || matrix.database == 'mysql' && 'mysql://auth_test:auth_test@127.0.0.1:3306/auth_test?ssl=require'
+            || 'sqlite://:memory:' }}

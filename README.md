@@ -14,7 +14,7 @@ Everything project-specific is an option of `configureAuth()`; only the database
 ## Install
 
 ```sh
-npm install github:TheRedLionOC/device-bound-auth#v1.0.0
+npm install github:TheRedLionOC/device-bound-auth#v1.1.0
 ```
 
 The server side is imported from your Worker or Bun code. The browser side is plain ES
@@ -58,7 +58,7 @@ configureAuth({
   loginRateLimit: cloudflareRateLimit(), // optional; bindings in wrangler.jsonc
 });
 
-registerAuthRoutes(router);   // /auth/login, /auth/me, /auth/refresh, /auth/logout
+registerAuthRoutes(router);   // /auth/login, /me, /refresh, /logout, /password
 registerUserRoutes(router);   // /users... (admin)
 ```
 
@@ -180,10 +180,23 @@ with `?` placeholders and portable SQL, so hooks work with any adapter.
 | `onReset` | no-op | Deletes the project's local data (logout, revoked session, different user) |
 | `sameScope` | same user id and role | `(previousUser, newUser) =>` whether local data can be kept on login |
 
-Exports: `api(path, { method, body })` (signed call, throws `ApiError` with `status` and
-`details`), `login`, `logout`, `getSession`, `refreshTokenIfNeeded`, `endSession({ revoked })`.
-Events on `window`: `auth:expired` (`detail.code`) and `auth:outdated` (another tab
-upgraded the auth database: reload).
+Exports:
+
+- `api(path, { method, body, auth })`: signed call (`auth: false` sends no credentials);
+  throws `ApiError` with `status` and `details`.
+- `login(username, password)`, `logout()`, `getSession()`, `refreshTokenIfNeeded()`,
+  `endSession({ revoked })`.
+- `changePassword(currentPassword, newPassword)`: the server checks the current password
+  and closes the user's other sessions; this one stays. Fails with 400 and `details.code`
+  `wrong_password` or `weak_password`, or 429 (counts against the login rate limit).
+
+Events on `window`:
+
+- `auth:expired`: the session ended; `detail.code` is `session_expired` (keep local data)
+  or `session_revoked` (delete it). If the device lost its key (part of the site data was
+  cleared), the module ends the session itself as `session_expired` with
+  `detail.reason: 'device_key_missing'`, without calling the server.
+- `auth:outdated`: another tab upgraded the auth database; reload.
 
 ## API
 
@@ -193,6 +206,7 @@ upgraded the auth database: reload).
 | GET | `/auth/me` | Current user |
 | POST | `/auth/refresh` | New token, extends the session |
 | POST | `/auth/logout` | Revokes the current session |
+| POST | `/auth/password` | `{ current_password, new_password }`: changes my own password, closes my other sessions |
 | GET/POST | `/users` | List / create (admin) |
 | PUT/DELETE | `/users/:id` | Update / soft delete (admin) |
 | GET | `/users/:id/sessions` | Open sessions of a user (admin) |
@@ -221,8 +235,10 @@ DATABASE_URL=postgres://... bun test       # or mysql://...?ssl=require (empty t
 ```
 
 The suite runs the server module on Bun with the browser module's signing code and checks
-login, signed requests, device binding, replay window, revocation, user administration
-and rate limiting.
+login, signed requests, device binding, replay window, revocation, password changes, user
+administration and rate limiting. GitHub Actions (`.github/workflows/test.yml`) runs it
+against SQLite, PostgreSQL and MySQL on every push and pull request, including Dependabot's
+weekly updates of `jose`.
 
 ## Tested with
 

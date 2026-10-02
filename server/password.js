@@ -1,7 +1,9 @@
 import { authConfig } from './config.js';
 import { base64ToBytes, bytesToBase64, timingSafeEqual } from './encoding.js';
+import { AuthError } from './errors.js';
 
 const HASH_BITS = 256;
+const MAX_PASSWORD_LENGTH = 200;
 // Hashes made before the iteration count was stored with them used this.
 const LEGACY_ITERATIONS = 100_000;
 
@@ -36,4 +38,16 @@ export async function verifyPassword(password, hash, salt) {
   const [iterations, encodedSalt] = salt.includes('$') ? salt.split('$') : [LEGACY_ITERATIONS, salt];
   const derived = await derive(password, base64ToBytes(encodedSalt), Number(iterations));
   return timingSafeEqual(derived, base64ToBytes(hash));
+}
+
+/** Returns the password if it meets passwords.minLength (and a sane maximum), else throws a 400. */
+export function checkNewPassword(password) {
+  const { minLength } = authConfig().passwords;
+  if (typeof password !== 'string' || password.length < minLength) {
+    throw new AuthError(400, `Password must be at least ${minLength} characters`, { code: 'weak_password' });
+  }
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    throw new AuthError(400, `Password must be at most ${MAX_PASSWORD_LENGTH} characters`);
+  }
+  return password;
 }

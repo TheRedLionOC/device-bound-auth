@@ -6,7 +6,7 @@
 import { authConfig, database } from './config.js';
 import * as store from './store.js';
 import { AuthError, json, readJson } from './errors.js';
-import { hashPassword } from './password.js';
+import { checkNewPassword, hashPassword } from './password.js';
 
 const ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 
@@ -30,7 +30,7 @@ async function createUser({ request, env }) {
   const db = database(env);
   const data = validateUser(await readJson(request));
   await hooks.validateUserChange(env, { data, previous: null });
-  const { hash, salt } = await hashPassword(checkPassword(data.password));
+  const { hash, salt } = await hashPassword(checkNewPassword(data.password));
   const id = crypto.randomUUID();
   const now = Date.now();
 
@@ -59,7 +59,7 @@ async function updateUser({ request, env, params, user: currentUser, session }) 
     ...(await hooks.userStatements(env, { user: { id, ...data }, previous, now })),
   ];
   if (data.password) {
-    const { hash, salt } = await hashPassword(checkPassword(data.password));
+    const { hash, salt } = await hashPassword(checkNewPassword(data.password));
     statements.push(store.updatePasswordStatement(id, hash, salt));
   }
   // A new password, a deactivated account or a different role close every open session
@@ -169,12 +169,4 @@ function validateUser(input) {
 function assertId(id) {
   if (typeof id !== 'string' || !ID_PATTERN.test(id)) throw new AuthError(400, 'Invalid id');
   return id;
-}
-
-function checkPassword(password) {
-  const { minLength } = authConfig().passwords;
-  if (!password || password.length < minLength) {
-    throw new AuthError(400, `Password must be at least ${minLength} characters`);
-  }
-  return password;
 }

@@ -11,10 +11,11 @@
  *   window.addEventListener('auth:expired', ({ detail }) => endSession({ revoked: detail.code === 'session_revoked' }));
  *
  * Events on window:
- *   auth:expired  the API rejected the session (detail.code: session_expired | session_revoked)
+ *   auth:expired  the session ended (detail.code: session_expired | session_revoked; for a
+ *                 device that lost its key: session_expired, detail.reason device_key_missing)
  *   auth:outdated a newer version of the app (another tab) upgraded the auth database;
  *                 this tab must reload
  */
 export { ApiError, api } from './api.js';
 export { configureAuth } from './config.js';
-export { endSession, getSession, login, logout, refreshTokenIfNeeded } from './session.js';
+export { changePassword, endSession, getSession, login, logout, refreshTokenIfNeeded } from './session.js';
