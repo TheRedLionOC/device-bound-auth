@@ -7,7 +7,8 @@
  *  - When the app is served from another origin (CORS), the server must allow the
  *    request headers AUTH_REQUEST_HEADERS and expose AUTH_EXPOSED_HEADERS.
  */
-export const AUTH_REQUEST_HEADERS = ['Authorization', 'Content-Type', 'X-Device-Timestamp', 'X-Device-Signature'];
+// DPoP carries the device proof (RFC 9449).
+export const AUTH_REQUEST_HEADERS = ['Authorization', 'Content-Type', 'DPoP'];
 export const AUTH_EXPOSED_HEADERS = ['X-Server-Time'];
 
 export function authResponseHeaders() {

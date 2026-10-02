@@ -1,6 +1,6 @@
 import { loadUser } from './authenticate.js';
 import { authConfig, database } from './config.js';
-import { normalizePublicKey } from './device-proof.js';
+import { storedPublicKey, verifyDpopProof } from './dpop.js';
 import { AuthError, json, readJson } from './errors.js';
 import { checkNewPassword, hashPassword, verifyPassword } from './password.js';
 import { refreshSession, startSession } from './sessions.js';
@@ -32,13 +32,23 @@ export function registerAuthRoutes(router, { prefix = '/auth' } = {}) {
   router.post(`${prefix}/password`, changePassword);
 }
 
+/**
+ * The device key a new session is bound to: the one in the DPoP proof sent with the request,
+ * which also proves the device holds the private key (RFC 9449 §5).
+ */
+async function deviceKey(request, env) {
+  return storedPublicKey((await verifyDpopProof(request, env)).jwk);
+}
+
 async function login({ request, env }) {
-  const { username, password, public_key: publicKeyJwk } = await readJson(request);
+  // Read from a copy: the DPoP proof check needs the original body (bh).
+  const body = await readJson(request.clone());
+  const { username, password } = body ?? {};
   if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
     throw new AuthError(400, 'Username and password are required');
   }
   await authConfig().loginRateLimit?.({ request, env, username });
-  const publicKey = await normalizePublicKey(publicKeyJwk);
+  const publicKey = await deviceKey(request, env);
 
   const user = await findLoginUser(database(env), username.trim());
 
@@ -63,12 +73,12 @@ async function register({ request, env }) {
   const { signup } = authConfig();
   if (!signup.enabled) throw new AuthError(404, 'Not found');
 
-  const body = await readJson(request);
+  const body = await readJson(request.clone());
   const username = typeof body?.username === 'string' ? body.username : '';
   await authConfig().loginRateLimit?.({ request, env, username });
   await signup.verify?.({ request, env, body });
   // Checked before creating the user, so a bad key does not leave an account behind.
-  const publicKey = signup.requireApproval ? null : await normalizePublicKey(body.public_key);
+  const publicKey = signup.requireApproval ? null : await deviceKey(request, env);
 
   const data = validateUser({
     username: body.username,
@@ -87,7 +97,7 @@ async function register({ request, env }) {
 
 /** Extends the current session and returns a new token (sliding expiration). */
 async function refresh({ env, user, session }) {
-  return json({ token: await refreshSession(env, user, session.id), user });
+  return json({ token: await refreshSession(env, user, session), user });
 }
 
 /** Revokes the current session so its token stops working everywhere. */

@@ -70,7 +70,10 @@ async function write(key, value) {
 export const readSession = () => read('session');
 export const writeSession = (session) => write('session', session);
 
-/** { privateKey } (a non-extractable CryptoKey, see device-key.js) or null. */
+/**
+ * { privateKey, publicJwk } (a non-extractable CryptoKey and its public JWK, see
+ * device-key.js) or null. A key without publicJwk cannot make proofs: the session ends.
+ */
 export const readDeviceKey = () => read('deviceKey');
 export const writeDeviceKey = (deviceKey) => write('deviceKey', deviceKey);
 

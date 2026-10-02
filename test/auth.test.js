@@ -1,10 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from './runner.js';
-import { createDeviceKey } from '../browser/device-key.js';
+import * as DPoP from 'dpop';
+import * as jose from 'jose';
+import { createDeviceKey, createDpopProof } from '../browser/device-key.js';
 import { memoryRateLimit } from '../server/rate-limits/memory.js';
 import { AuthError, configureAuth, statement } from '../server/index.js';
 import { DATABASE_URL, RUNTIME, client, createDatabase, insertUser, newIp, startServer } from './harness.js';
 
 const ADMIN_PASSWORD = 'Admin12345';
+const JWT_SECRET = 'test-secret-0123456789abcdef';
 let database;
 let server;
 let api;
@@ -16,7 +19,7 @@ beforeAll(async () => {
   database = await createDatabase();
   configureAuth({
     database: () => database.db,
-    jwtSecret: () => 'test-secret-0123456789abcdef',
+    jwtSecret: () => JWT_SECRET,
     loginRateLimit: memoryRateLimit({ clientIp: ({ env }) => env.CLIENT_IP }),
     roles: ['user', 'admin'],
     access: { any: ['user', 'admin'], admin: ['admin'] },
@@ -55,16 +58,16 @@ describe('login', () => {
     expect(wrong.data.error).toBe(unknown.data.error);
   });
 
-  test('a device public key is required', async () => {
+  test('a DPoP proof is required to bind the new session', async () => {
     const res = await api.call('/auth/login', {
       method: 'POST',
       ip: newIp(),
       body: { username: 'admin', password: ADMIN_PASSWORD },
     });
-    expect(res.status).toBe(400);
+    expect(`${res.status} ${res.data.details.code}`).toBe('401 invalid_dpop_proof');
   });
 
-  test('legacy hashes without a stored iteration count still verify', async () => {
+  test('password hashes without a stored iteration count still verify', async () => {
     const username = unique();
     const id = await insertUser(database.db, { username, password: 'Password1', iterations: 100_000 });
     await database.db.run(
@@ -120,6 +123,140 @@ describe('signed requests (device binding)', () => {
   });
 });
 
+describe('DPoP (RFC 9449)', () => {
+  const decode = (jwt) => jwt.split('.').slice(0, 2).map((part) => JSON.parse(Buffer.from(part, 'base64url').toString()));
+  const b64sha256 = async (text) =>
+    Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))).toString('base64url');
+  const proofFor = (auth, method, path, { bodyText = '', accessToken = auth.token, at = Date.now() } = {}) =>
+    createDpopProof(
+      { privateKey: auth.key, publicJwk: auth.publicJwk },
+      { method, url: new URL(server.url + path), accessToken, bodyText, timestamp: at },
+    );
+
+  test('proofs and tokens have the RFC shape, checked independently with jose', async () => {
+    const { auth } = await api.login('admin', ADMIN_PASSWORD);
+    const proof = await proofFor(auth, 'GET', '/users?active=1');
+    const [header, payload] = decode(proof);
+    expect(header.typ).toBe('dpop+jwt');
+    expect(header.alg).toBe('ES256');
+    expect(Object.keys(header.jwk).sort()).toEqual(['crv', 'kty', 'x', 'y']); // public part only
+    expect(payload.htm).toBe('GET');
+    expect(payload.htu).toBe(`${server.url}/users`); // without the query
+    expect(typeof payload.jti).toBe('string');
+    expect(payload.ath).toBe(await b64sha256(auth.token));
+    expect(payload.qh).toBe(await b64sha256('?active=1'));
+    const { payload: verified } = await jose.jwtVerify(proof, jose.EmbeddedJWK, { typ: 'dpop+jwt', algorithms: ['ES256'] });
+    expect(verified.jti).toBe(payload.jti);
+
+    const [, token] = decode(auth.token);
+    expect(token.cnf.jkt).toBe(await jose.calculateJwkThumbprint(auth.publicJwk));
+  });
+
+  test('interoperates with an independent DPoP implementation (panva/dpop)', async () => {
+    const keypair = await DPoP.generateKeyPair('ES256');
+    const body = JSON.stringify({ username: 'admin', password: ADMIN_PASSWORD });
+    const loginProof = await DPoP.generateProof(keypair, `${server.url}/auth/login`, 'POST', undefined, undefined, {
+      bh: await b64sha256(body),
+    });
+    const login = await api.call('/auth/login', { method: 'POST', ip: newIp(), rawBody: body, proof: loginProof });
+    expect(login.status).toBe(200);
+    const token = login.data.token;
+    const plain = (method, path) => DPoP.generateProof(keypair, server.url + path, method, undefined, token);
+    const headers = { Authorization: `DPoP ${token}` };
+
+    // A plain proof is enough for requests without body or query.
+    expect((await api.call('/auth/me', { headers, proof: await plain('GET', '/auth/me') })).status).toBe(200);
+    // With a body, the bh extension is required by default...
+    const refused = await api.call('/auth/refresh', { method: 'POST', headers, proof: await plain('POST', '/auth/refresh') });
+    expect(refused.data.details.code).toBe('invalid_dpop_proof');
+    // ...unless the project allows plain DPoP clients.
+    configureAuth({ signatures: { requireBodyAndQueryHashes: false } });
+    try {
+      const ok = await api.call('/auth/refresh', { method: 'POST', headers, proof: await plain('POST', '/auth/refresh') });
+      expect(ok.status).toBe(200);
+    } finally {
+      configureAuth({ signatures: { requireBodyAndQueryHashes: true } });
+    }
+  });
+
+  test('a proof for another method, URL, query, body or token is refused', async () => {
+    const { auth } = await api.login('admin', ADMIN_PASSWORD);
+    const refusedWith = async (proof, options = {}) => {
+      const res = await api.call(options.path ?? '/users?active=1', { auth, proof, ...options });
+      return `${res.status} ${res.data?.details?.code}`;
+    };
+    const expected = '401 invalid_dpop_proof';
+    expect(await refusedWith(await proofFor(auth, 'POST', '/users?active=1'))).toBe(expected); // method
+    expect(await refusedWith(await proofFor(auth, 'GET', '/auth/me'))).toBe(expected); // URL
+    expect(await refusedWith(await proofFor(auth, 'GET', '/users?active=0'))).toBe(expected); // query
+    expect(await refusedWith(await proofFor(auth, 'GET', '/users?active=1', { accessToken: 'another-token' }))).toBe(expected);
+    const body = { username: unique(), name: 'x', password: 'Password1' };
+    const proof = await proofFor(auth, 'POST', '/users', { bodyText: JSON.stringify(body) });
+    const tampered = JSON.stringify({ ...body, role: 'admin' });
+    expect(await refusedWith(proof, { path: '/users', method: 'POST', body, rawBody: tampered })).toBe(expected);
+  });
+
+  test('forged proofs are refused: alg none, wrong typ, key of another session', async () => {
+    const { auth } = await api.login('admin', ADMIN_PASSWORD);
+    const valid = await proofFor(auth, 'GET', '/auth/me');
+    const [header, payload] = decode(valid);
+    const unsigned = [{ ...header, alg: 'none' }, payload].map((part) => Buffer.from(JSON.stringify(part)).toString('base64url'));
+    expect((await api.call('/auth/me', { auth, proof: `${unsigned.join('.')}.` })).status).toBe(401);
+
+    const wrongTyp = await new jose.SignJWT(payload)
+      .setProtectedHeader({ alg: 'ES256', typ: 'JWT', jwk: auth.publicJwk })
+      .sign(auth.key);
+    expect((await api.call('/auth/me', { auth, proof: wrongTyp })).status).toBe(401);
+
+    const other = (await api.login('admin', ADMIN_PASSWORD)).auth;
+    const res = await api.call('/auth/me', { auth, proof: await proofFor({ ...other, token: auth.token }, 'GET', '/auth/me') });
+    expect(res.data.details.code).toBe('invalid_dpop_proof');
+  });
+
+  test('useJti refuses a replayed proof', async () => {
+    const seen = new Set();
+    configureAuth({ signatures: { useJti: async ({ jti }) => !seen.has(jti) && Boolean(seen.add(jti)) } });
+    try {
+      const { auth } = await api.login('admin', ADMIN_PASSWORD);
+      const proof = await proofFor(auth, 'GET', '/auth/me');
+      expect((await api.call('/auth/me', { auth, proof })).status).toBe(200);
+      const replay = await api.call('/auth/me', { auth, proof });
+      expect(replay.status).toBe(401);
+      expect(replay.data.details.code).toBe('invalid_dpop_proof');
+    } finally {
+      configureAuth({ signatures: { useJti: null } });
+    }
+  });
+
+  test('authentic tokens used without DPoP expire; forged tokens are revoked', async () => {
+    const { auth } = await api.login('admin', ADMIN_PASSWORD);
+    const code = async (token, scheme = 'DPoP') => {
+      const res =
+        scheme === 'DPoP'
+          ? await api.call('/auth/me', { auth: { ...auth, token } })
+          : await api.call('/auth/me', { headers: { Authorization: `${scheme} ${token}` } });
+      return `${res.status} ${res.data.details.code}`;
+    };
+    const sign = (claims, secret = JWT_SECRET) =>
+      new jose.SignJWT(claims).setProtectedHeader({ alg: 'HS256', typ: 'JWT' }).sign(new TextEncoder().encode(secret));
+    const [, claims] = decode(auth.token);
+
+    // Authentic (issued by this server) but not used as required: log in again, keep data.
+    expect(await code(auth.token, 'Bearer')).toBe('401 session_expired');
+    const { cnf: _cnf, ...unbound } = claims;
+    expect(await code(await sign(unbound))).toBe('401 session_expired');
+
+    // Not authentic (another secret): revoked, whatever the scheme.
+    const forged = await sign(claims, 'another-secret-0123456789');
+    expect(await code(forged)).toBe('401 session_revoked');
+    expect(await code(forged, 'Bearer')).toBe('401 session_revoked');
+
+    // Login without a DPoP proof: no key to bind the session to.
+    const noProof = await api.login('admin', ADMIN_PASSWORD, { proof: null });
+    expect(`${noProof.status} ${noProof.data.details.code}`).toBe('401 invalid_dpop_proof');
+  });
+});
+
 describe('sessions', () => {
   test('refresh returns a new working token', async () => {
     const { auth } = await api.login('admin', ADMIN_PASSWORD);
@@ -138,10 +275,17 @@ describe('sessions', () => {
 });
 
 describe('self sign-up', () => {
-  const register = async (body, { ip = newIp() } = {}) => {
+  // Like the browser: a DPoP proof binds the new session (`withProof: false` sends none).
+  const register = async (body, { ip = newIp(), withProof = true } = {}) => {
     const { privateKey, publicJwk } = await createDeviceKey();
-    const res = await api.call('/auth/register', { method: 'POST', ip, body: { public_key: publicJwk, ...body } });
-    return { ...res, auth: res.data?.token && { token: res.data.token, key: privateKey } };
+    const proof = withProof
+      ? await createDpopProof(
+          { privateKey, publicJwk },
+          { method: 'POST', url: new URL(`${server.url}/auth/register`), bodyText: JSON.stringify(body), timestamp: Date.now() },
+        )
+      : undefined;
+    const res = await api.call('/auth/register', { method: 'POST', ip, body, proof });
+    return { ...res, auth: res.data?.token && { token: res.data.token, key: privateKey, publicJwk } };
   };
   const enable = (signup) => configureAuth({ signup: { enabled: true, role: 'user', requireApproval: false, verify: null, ...signup } });
   afterAll(() => configureAuth({ signup: { enabled: false, requireApproval: false, verify: null } }));
@@ -170,7 +314,8 @@ describe('self sign-up', () => {
     expect(again.status).toBe(409);
     expect(again.data.details.code).toBe('duplicate');
     expect((await register({ username: unique(), name: 'x', password: 'short' })).data.details.code).toBe('weak_password');
-    expect((await register({ username: unique(), name: 'x', password: 'Password1', public_key: null })).status).toBe(400);
+    const noProof = await register({ username: unique(), name: 'x', password: 'Password1' }, { withProof: false });
+    expect(noProof.data.details.code).toBe('invalid_dpop_proof');
   });
 
   test('requireApproval: inactive until an admin activates it', async () => {

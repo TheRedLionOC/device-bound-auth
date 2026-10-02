@@ -20,10 +20,12 @@ export async function login(username, password) {
   const { privateKey, publicJwk } = await createDeviceKey();
   const { token, user } = await api(`${authConfig().authPath}/login`, {
     method: 'POST',
-    body: { username, password, public_key: publicJwk },
+    // The server takes the key from the DPoP proof (proofKey).
+    body: { username, password },
     auth: false,
+    proofKey: { privateKey, publicJwk },
   });
-  await startLocalSession(token, user, privateKey);
+  await startLocalSession(token, user, { privateKey, publicJwk });
   return user;
 }
 
@@ -38,20 +40,21 @@ export async function register({ username, name, password, ...extra }) {
   const result = await api(`${authConfig().authPath}/register`, {
     method: 'POST',
     // `extra` reaches the server's signup.verify hook (e.g. a CAPTCHA token).
-    body: { ...extra, username, name, password, public_key: publicJwk },
+    body: { ...extra, username, name, password },
     auth: false,
+    proofKey: { privateKey, publicJwk },
   });
   if (result.pending) return { pending: true };
-  await startLocalSession(result.token, result.user, privateKey);
+  await startLocalSession(result.token, result.user, { privateKey, publicJwk });
   return { user: result.user };
 }
 
-async function startLocalSession(token, user, privateKey) {
+async function startLocalSession(token, user, deviceKey) {
   // Local data belongs to one user (and scope): start clean when that changes.
   const previous = (await readSession())?.user;
   if (previous && !authConfig().sameScope(previous, user)) await authConfig().onReset();
 
-  await writeDeviceKey({ privateKey });
+  await writeDeviceKey(deviceKey);
   await writeSession({ token, issuedAt: Date.now(), user });
 }
 

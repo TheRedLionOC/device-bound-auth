@@ -32,9 +32,20 @@ const config = {
     // last_seen_at is written at most this often on reads; writes always update it.
     lastSeenResolutionMs: 5 * MINUTE_MS,
   },
+  // Device binding with DPoP proofs (RFC 9449, see dpop.js).
   signatures: {
-    // Signed requests are accepted this close to the server time (replay window).
+    // Proofs are accepted this close to the server time (replay window).
     maxClockSkewMs: 5 * MINUTE_MS,
+    // Require the bh/qh extension claims (hashes of body and query), so a captured proof
+    // cannot be reused with other data. false: also accept plain DPoP proofs from other
+    // clients (bh/qh are still checked when present); consider useJti then.
+    requireBodyAndQueryHashes: true,
+    // async ({ jti, expiresAt, env }) => boolean: true the first time a proof id is seen
+    // (record it until expiresAt), false for a repeat, which is refused. null: no check.
+    useJti: null,
+    // Public origin of the API (e.g. 'https://api.example.com') when the server sees another
+    // one, e.g. behind a proxy. null: the request's own origin. Compared with htu.
+    origin: null,
   },
   passwords: {
     minLength: 8,

@@ -1,4 +1,5 @@
 import { database, jwtSecret, sessionRetentionMs, sessionTtlMs } from './config.js';
+import { jwkThumbprint } from './dpop.js';
 import { signJwt } from './jwt.js';
 import { createSession, extendSession } from './store.js';
 
@@ -10,8 +11,8 @@ import { createSession, extendSession } from './store.js';
 const MAX_USER_AGENT_LENGTH = 300;
 
 /**
- * Creates a session bound to the device's public key (see device-proof.js)
- * and returns a token for it.
+ * Creates a session bound to the device's public key (a JWK as JSON, from the login's DPoP
+ * proof) and returns a token bound to that key (cnf.jkt, RFC 9449).
  */
 export async function startSession(env, user, request, publicKey) {
   const now = Date.now();
@@ -24,15 +25,16 @@ export async function startSession(env, user, request, publicKey) {
     expiresAt: now + sessionTtlMs(),
   };
   await createSession(database(env), session, now - sessionRetentionMs());
-  return issueToken(env, user, session.id);
+  return issueToken(env, user, session.id, await jwkThumbprint(JSON.parse(publicKey)));
 }
 
-/** Extends the session and returns a fresh token for it. */
-export async function refreshSession(env, user, sessionId) {
-  await extendSession(database(env), sessionId, Date.now() + sessionTtlMs());
-  return issueToken(env, user, sessionId);
+/** Extends the session ({ id, jkt } from authenticate) and returns a fresh token for it. */
+export async function refreshSession(env, user, session) {
+  await extendSession(database(env), session.id, Date.now() + sessionTtlMs());
+  return issueToken(env, user, session.id, session.jkt);
 }
 
-function issueToken(env, user, sessionId) {
-  return signJwt({ sub: user.id, sid: sessionId, role: user.role }, jwtSecret(env), Math.floor(sessionTtlMs() / 1000));
+function issueToken(env, user, sessionId, jkt) {
+  const claims = { sub: user.id, sid: sessionId, role: user.role, cnf: { jkt } };
+  return signJwt(claims, jwtSecret(env), Math.floor(sessionTtlMs() / 1000));
 }

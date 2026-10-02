@@ -14,7 +14,7 @@ Everything project-specific is an option of `configureAuth()`; only the database
 ## Install
 
 ```sh
-npm install github:TheRedLionOC/device-bound-auth#v1.3.0
+npm install github:TheRedLionOC/device-bound-auth#v2.0.0
 ```
 
 The server side is imported from your Worker or Bun code. The browser side is plain ES
@@ -30,12 +30,16 @@ time and import it from there.
   re-reads the session and the user, so logout, revoking, deactivating, deleting a user or
   changing their password/role take effect immediately. Sliding expiration: the browser
   refreshes the token while in use.
-- **Device binding:** at login the browser creates a non-extractable ECDSA P-256 key and
-  sends its public key. Every request is signed (method, path, timestamp, body hash), so a
-  copied token is useless on another device, and a copied request expires within
-  `signatures.maxClockSkewMs`.
-- **401 codes** tell the app what to do: `session_expired` (timed out: keep local data,
-  log in again) or `session_revoked` (closed on purpose: delete local data).
+- **Device binding with DPoP** ([RFC 9449](https://www.rfc-editor.org/rfc/rfc9449)): at
+  login the browser creates a non-extractable ECDSA P-256 key and proves it holds it; the
+  session and its token (`cnf.jkt`) are bound to that key. Every request carries a DPoP proof
+  signed by the key, so a copied token is useless on another device and a captured proof
+  expires within `signatures.maxClockSkewMs`. See **Device binding (DPoP)** below.
+- **401 codes** tell the app what to do with its local data:
+  - `session_expired`: the token is authentic but no longer accepted (timed out, or not
+    sent with the DPoP scheme / not bound to a key). Keep local data; log in again.
+  - `session_revoked`: the session was closed on purpose (logout, admin, password or role
+    change, user deactivated) or the token is not authentic. Delete local data.
 - **User administration** (role `admin`): list, create, update, soft delete, list and
   revoke sessions. Deleted users keep their row (history) and free their username.
 - **Users change their own password** (current one required; other sessions closed).
@@ -137,7 +141,7 @@ app.use('/api', nodeHandler((request, req) => handle(request, { CLIENT_IP: req.i
 app.use(express.json()); // your other routes
 ```
 
-Signed requests cover the exact body bytes; if a parser already read the body,
+DPoP proofs cover the exact body bytes (`bh`); if a parser already read the body,
 `nodeHandler` throws an error saying so. Behind a proxy, pass `nodeHandler(fn, { trustProxy:
 true })` so `X-Forwarded-Proto` is honored, and take the client IP from your proxy's header.
 `node:sqlite` is synchronous, which is normal for SQLite (it runs in-process; the module's
@@ -190,7 +194,10 @@ const { users } = await api('/users');
 | `sessions.ttlDays` | `30` | Session and token lifetime since the last refresh |
 | `sessions.retentionDays` | `365` | Expired/revoked sessions are deleted after this |
 | `sessions.lastSeenResolutionMs` | 5 min | `last_seen_at` write frequency on reads |
-| `signatures.maxClockSkewMs` | 5 min | Replay window for signed requests |
+| `signatures.maxClockSkewMs` | 5 min | Replay window for DPoP proofs (`iat`) |
+| `signatures.requireBodyAndQueryHashes` | `true` | Require the `bh` / `qh` extension claims. `false`: also accept plain DPoP proofs from other clients |
+| `signatures.useJti` | `null` | `async ({ jti, expiresAt, env }) => boolean`: `true` the first time a proof id is seen (store it until `expiresAt`); a repeat is refused |
+| `signatures.origin` | request origin | Public origin of the API compared with `htu`, when the server sees another one (proxy) |
 | `passwords.minLength` | `8` | |
 | `passwords.iterations` | `100000` | Maximum on Cloudflare Workers; OWASP recommends 600,000 elsewhere |
 | `users.usernameMaxLength` / `nameMaxLength` | `50` / `100` | |
@@ -254,7 +261,8 @@ with `?` placeholders and portable SQL, so hooks work with any adapter.
 
 Exports:
 
-- `api(path, { method, body, auth })`: signed call (`auth: false` sends no credentials);
+- `api(path, { method, body, auth })`: call with the token and a DPoP proof (`auth: false`
+  sends no credentials);
   throws `ApiError` with `status` and `details`.
 - `login(username, password)`, `logout()`, `getSession()`, `refreshTokenIfNeeded()`,
   `endSession({ revoked })`.
@@ -273,12 +281,64 @@ Events on `window`:
   `detail.reason: 'device_key_missing'`, without calling the server.
 - `auth:outdated`: another tab upgraded the auth database; reload.
 
+## Device binding (DPoP)
+
+Requests use OAuth 2.0 DPoP ([RFC 9449](https://www.rfc-editor.org/rfc/rfc9449)):
+
+```
+Authorization: DPoP <session token>
+DPoP: <proof>
+```
+
+The proof is a JWT signed with the device key: header `{ typ: 'dpop+jwt', alg: 'ES256', jwk }`,
+claims `jti`, `htm`, `htu`, `iat` and `ath` (hash of the token). The server verifies it as
+RFC 9449 §4.3 describes and checks that its key is the session's (and the token's `cnf.jkt`).
+Login and sign-up send a proof too, so the session is bound to a key the device really holds.
+
+**Extensions.** Standard DPoP covers the method and the URL, not the query or the body. Proofs
+also carry `qh` and `bh`, the SHA-256 (base64url) of the query string and of the body, so a
+captured proof cannot be reused with other data. The RFC allows extra claims and other
+verifiers ignore them. They are required by default; with `requireBodyAndQueryHashes: false`
+the server also accepts plain DPoP proofs from other clients and still checks `bh`/`qh` when
+present. Tests verify interoperability with [panva/dpop](https://github.com/panva/dpop).
+
+**Replays.** A proof is valid for `maxClockSkewMs`. Within that window an identical request
+could be replayed (never a modified one, thanks to `bh`/`qh`). To refuse even that, give
+`useJti` a store that remembers proof ids, e.g. Workers KV:
+
+```js
+signatures: {
+  useJti: async ({ jti, expiresAt, env }) => {
+    if (await env.KV.get(`jti:${jti}`)) return false;
+    await env.KV.put(`jti:${jti}`, '1', { expiration: Math.ceil(expiresAt / 1000) });
+    return true;
+  },
+},
+```
+
+This costs a write per request, and KV is eventually consistent, so it narrows replays
+rather than ruling them out. A strongly consistent store (Durable Object, Redis, database)
+rules them out.
+
+**No server nonces.** `DPoP-Nonce` is not used: freshness comes from `iat` and the browser
+corrects its clock with `X-Server-Time`.
+
+**Upgrading from 1.x.** Every user logs in again once: 1.x tokens and clients get 401
+`session_expired` (apps keep local data and show the login), and a browser whose stored key
+comes from 1.x ends its session itself. Deploy the server and the browser module together:
+a 1.x server does not allow the `DPoP` header in CORS, and a 2.0 server refuses 1.x logins.
+
+**Limits.** As with any DPoP in browsers, code running inside the page (XSS, a malicious
+extension) can use the key while the page is open, although it cannot copy it. Chrome's
+Device Bound Session Credentials keep keys in the TPM, but only for cookies and only in
+Chrome.
+
 ## API
 
 | Method | Path | |
 | --- | --- | --- |
-| POST | `/auth/login` | `{ username, password, public_key }` → `{ token, user }` (the browser module sends the key) |
-| POST | `/auth/register` | `{ username, name, password, public_key }` → `{ token, user }` or `{ pending: true }` (only with `signup.enabled`) |
+| POST | `/auth/login` | `{ username, password }` + `DPoP` proof → `{ token, user }`, the token bound to the proof's key |
+| POST | `/auth/register` | `{ username, name, password }` + `DPoP` proof → `{ token, user }` or `{ pending: true }` (only with `signup.enabled`) |
 | GET | `/auth/me` | Current user |
 | POST | `/auth/refresh` | New token, extends the session |
 | POST | `/auth/logout` | Revokes the current session |

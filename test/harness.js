@@ -9,7 +9,7 @@
  *   Node: node:sqlite, pg or mysql2 (their adapters)
  */
 import { readFileSync } from 'node:fs';
-import { createDeviceKey, signRequest } from '../browser/device-key.js';
+import { createDeviceKey, createDpopProof } from '../browser/device-key.js';
 import {
   AuthError,
   authResponseHeaders,
@@ -189,28 +189,44 @@ let ipCounter = 0;
 /** A fresh client IP, so tests do not share rate limit counters. */
 export const newIp = () => `10.0.${Math.floor(++ipCounter / 250)}.${ipCounter % 250}`;
 
-/** HTTP client: signs requests like the browser module does. */
+/**
+ * HTTP client: proves requests with DPoP like the browser module does. `auth` is { token,
+ * key, publicJwk }. `rawBody` sends other bytes than the signed `body` (tampering tests);
+ * `proof` overrides the DPoP header; `headers` adds or overrides headers.
+ */
 export function client(baseUrl) {
-  async function call(path, { method = 'GET', body, auth, ip = '127.0.0.1', timestamp, rawBody } = {}) {
-    const bodyText = rawBody ?? (body === undefined ? undefined : JSON.stringify(body));
-    const headers = { 'Content-Type': 'application/json', 'X-Test-IP': ip };
+  async function call(path, { method = 'GET', body, auth, ip = '127.0.0.1', timestamp, rawBody, proof, headers: extra } = {}) {
+    const signed = body === undefined ? '' : JSON.stringify(body);
+    const bodyText = rawBody ?? (body === undefined ? undefined : signed);
+    const headers = { 'Content-Type': 'application/json', 'X-Test-IP': ip, ...extra };
+    const url = new URL(baseUrl + path);
+    const at = timestamp ?? Date.now();
     if (auth) {
-      const url = new URL(baseUrl + path);
-      headers.Authorization = `Bearer ${auth.token}`;
-      const signed = body === undefined && rawBody === undefined ? '' : JSON.stringify(body);
-      Object.assign(
-        headers,
-        await signRequest(auth.key, method, url.pathname + url.search, signed, timestamp ?? Date.now()),
-      );
+      headers.Authorization = `DPoP ${auth.token}`;
+      headers.DPoP =
+        proof ??
+        (await createDpopProof(
+          { privateKey: auth.key, publicJwk: auth.publicJwk },
+          { method, url, accessToken: auth.token, bodyText: signed, timestamp: at },
+        ));
+    } else if (proof) {
+      headers.DPoP = proof;
     }
-    const response = await fetch(baseUrl + path, { method, headers, body: bodyText });
+    const response = await fetch(url, { method, headers, body: bodyText });
     return { status: response.status, headers: response.headers, data: await response.json().catch(() => null) };
   }
 
-  async function login(username, password, { ip = newIp() } = {}) {
+  /** Logs in with a new device key, bound with a DPoP proof (`proof: null` sends none). */
+  async function login(username, password, { ip = newIp(), proof } = {}) {
     const { privateKey, publicJwk } = await createDeviceKey();
-    const res = await call('/auth/login', { method: 'POST', ip, body: { username, password, public_key: publicJwk } });
-    return { ...res, auth: res.data?.token && { token: res.data.token, key: privateKey } };
+    const url = new URL(`${baseUrl}/auth/login`);
+    const body = { username, password };
+    const sent =
+      proof === null
+        ? undefined
+        : await createDpopProof({ privateKey, publicJwk }, { method: 'POST', url, bodyText: JSON.stringify(body), timestamp: Date.now() });
+    const res = await call('/auth/login', { method: 'POST', ip, body, proof: sent });
+    return { ...res, auth: res.data?.token && { token: res.data.token, key: privateKey, publicJwk } };
   }
 
   return { call, login };

@@ -4,6 +4,30 @@ All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org): a major version for breaking changes, a minor
 version for new options or features, a patch version for fixes.
 
+## 2.0.0 — 2026-10-02
+
+**Breaking:** device binding is now standard DPoP and the 1.x format is gone. Every user logs
+in again once after upgrading. Update the server and the browser module together.
+
+- Requests use DPoP (RFC 9449): `Authorization: DPoP <token>` plus a `DPoP` proof
+  (`typ: dpop+jwt`, ES256, `jti`/`htm`/`htu`/`iat`/`ath`), verified as RFC 9449 §4.3 says.
+  Tokens carry `cnf.jkt`.
+- Login and sign-up take the device key from a DPoP proof, which also proves the device
+  holds the private key. `public_key` in the body is no longer accepted.
+- Extension claims `bh` / `qh` (hashes of body and query) keep the protection against
+  reusing a captured proof with other data; `signatures.requireBodyAndQueryHashes: false`
+  also accepts plain DPoP clients.
+- New options: `signatures.useJti` (refuse replayed proofs), `signatures.origin` (public
+  origin behind a proxy).
+- Removed: the `Bearer` + `X-Device-Timestamp` / `X-Device-Signature` format, and
+  `AUTH_REQUEST_HEADERS` now lists `DPoP` instead of the `X-Device-*` headers.
+- 401 codes follow authenticity: an authentic token that is not sent with the DPoP scheme or
+  not bound to a key gets `session_expired` (keep local data, log in again); a token that is
+  not authentic gets `session_revoked` whatever the scheme. So 1.x clients and tokens are
+  told to log in again, and a browser whose stored key is incomplete (as 1.x keys are) ends
+  its session the same way (`auth:expired`, `reason: 'device_key_missing'`).
+- Tests check the RFC shape with jose and interoperability with panva/dpop.
+
 ## 1.3.0 — 2026-10-01
 
 - Node support. Database adapters for `node:sqlite`, `pg` and `mysql2` (the project installs
