@@ -4,6 +4,18 @@ All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org): a major version for breaking changes, a minor
 version for new options or features, a patch version for fixes.
 
+## 2.2.0 — 2026-10-07
+
+- Browser: requests time out after `requestTimeoutMs` (default 30 s; `null` for no limit)
+  with `ApiError` status 0 and `details.code: 'timeout'`, also when the body stalls halfway.
+- Browser: `api(path, { signal })` cancels a request with an `AbortSignal` (rejects with the
+  signal's reason, an `AbortError` by default, not a network error).
+- Fix: a failed IndexedDB write rejected with `null` and also left an unhandled rejection;
+  it now rejects once with the real error.
+- Fix: if the browser closed the auth database connection (e.g. site data cleared while the
+  page was open), every later call failed with `InvalidStateError` until a reload; the
+  connection now reopens on next use.
+
 ## 2.1.0 — 2026-10-02
 
 - `signatures.maxClockSkewMs` defaults to 60 s (was 5 min). The browser module corrects its

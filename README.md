@@ -14,7 +14,7 @@ Everything project-specific is an option of `configureAuth()`; only the database
 ## Install
 
 ```sh
-npm install github:TheRedLionOC/device-bound-auth#v2.1.0
+npm install github:TheRedLionOC/device-bound-auth#v2.2.0
 ```
 
 The server side is imported from your Worker or Bun code. The browser side is plain ES
@@ -260,14 +260,17 @@ with `?` placeholders and portable SQL, so hooks work with any adapter.
 | `refreshAfterMs` | 1 day | Token renewal frequency while in use; keep below `sessions.ttlDays` |
 | `storageName` | `'app-auth'` | IndexedDB database for the session and device key |
 | `offlineMessage` | `'Cannot reach the server'` | Message of `ApiError` with status 0 |
+| `requestTimeoutMs` | `30000` | Give up on a request after this long: `ApiError` status 0, `details.code: 'timeout'` (networks that stay connected but stop answering). `null`: no limit |
 | `onReset` | no-op | Deletes the project's local data (logout, revoked session, different user) |
 | `sameScope` | same user id and role | `(previousUser, newUser) =>` whether local data can be kept on login |
 
 Exports:
 
-- `api(path, { method, body, auth })`: call with the token and a DPoP proof (`auth: false`
-  sends no credentials);
-  throws `ApiError` with `status` and `details`.
+- `api(path, { method, body, auth, signal })`: call with the token and a DPoP proof
+  (`auth: false` sends no credentials). Throws `ApiError` with `status` and `details`;
+  status 0 when the server cannot be reached or after `requestTimeoutMs`
+  (`details.code: 'timeout'`). `signal` (an `AbortSignal`) cancels it, rejecting with the
+  signal's reason (`AbortError`).
 - `login(username, password)`, `logout()`, `getSession()`, `refreshTokenIfNeeded()`,
   `endSession({ revoked })`.
 - `register({ username, name, password, ...extra })`: self sign-up; logs in on this device

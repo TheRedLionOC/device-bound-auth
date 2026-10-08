@@ -25,8 +25,13 @@ let clockOffsetMs = 0;
  * publicJwk }) then adds a DPoP proof without a token, binding a new session to that key.
  * Dispatches `auth:expired` on 401, with `detail.code` = 'session_expired' or
  * 'session_revoked' (see server/authenticate.js).
+ *
+ * Gives up after configureAuth({ requestTimeoutMs }) with ApiError status 0 and
+ * details.code 'timeout' (like being offline). `signal` (an AbortSignal) lets the caller
+ * cancel: the promise then rejects with the signal's reason (an AbortError by default).
  */
-export async function api(path, { method = 'GET', body, auth = true, proofKey } = {}) {
+export async function api(path, { method = 'GET', body, auth = true, proofKey, signal } = {}) {
+  signal?.throwIfAborted();
   const [session, deviceKey] = auth ? await Promise.all([readSession(), readDeviceKey()]) : [null, null];
 
   // A session whose device key is missing or incomplete (e.g. part of the site data was
@@ -40,11 +45,11 @@ export async function api(path, { method = 'GET', body, auth = true, proofKey } 
   }
 
   const key = session?.token ? deviceKey : proofKey;
-  let result = await send(path, method, body, session?.token, key);
+  let result = await send(path, method, body, session?.token, key, signal);
 
   // The device clock was too far off: retry once with the offset learned from the response.
   if (result.response.status === 401 && result.data?.details?.code === 'clock_skew') {
-    result = await send(path, method, body, session?.token, key);
+    result = await send(path, method, body, session?.token, key, signal);
   }
 
   const { response, data } = result;
@@ -57,7 +62,7 @@ export async function api(path, { method = 'GET', body, auth = true, proofKey } 
   return data;
 }
 
-async function send(path, method, body, token, key) {
+async function send(path, method, body, token, key, signal) {
   const url = new URL(`${authConfig().apiUrl}${path}`);
   const bodyText = body === undefined ? undefined : JSON.stringify(body);
   const timestamp = Date.now() + clockOffsetMs;
@@ -70,16 +75,60 @@ async function send(path, method, body, token, key) {
     headers.DPoP = await createDpopProof(key, { method, url, accessToken: token, bodyText: bodyText ?? '', timestamp });
   }
 
-  let response;
+  const abort = abortSignal(signal);
   try {
-    response = await fetch(url, { method, headers, body: bodyText });
-  } catch {
-    throw new ApiError(0, authConfig().offlineMessage);
+    let response;
+    try {
+      response = await fetch(url, { method, headers, body: bodyText, signal: abort.signal });
+    } catch {
+      throw abort.reason() ?? new ApiError(0, authConfig().offlineMessage);
+    }
+
+    const serverTime = Number(response.headers.get('X-Server-Time'));
+    if (serverTime) clockOffsetMs = serverTime - Date.now();
+
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      // A body cut by the timeout or the caller is that error; otherwise it is just not JSON.
+      const reason = abort.reason();
+      if (reason) throw reason;
+    }
+    return { response, data };
+  } finally {
+    abort.done();
   }
+}
 
-  const serverTime = Number(response.headers.get('X-Server-Time'));
-  if (serverTime) clockOffsetMs = serverTime - Date.now();
+/**
+ * One AbortSignal for a request: aborted by the caller's `signal` or by
+ * configureAuth({ requestTimeoutMs }). reason() tells which one stopped the request:
+ * the caller's own reason, an ApiError 'timeout', or null when it was neither.
+ */
+function abortSignal(signal) {
+  const { requestTimeoutMs, offlineMessage } = authConfig();
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = requestTimeoutMs
+    ? setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, requestTimeoutMs)
+    : null;
+  const onCallerAbort = () => controller.abort();
+  signal?.addEventListener('abort', onCallerAbort, { once: true });
 
-  const data = await response.json().catch(() => null);
-  return { response, data };
+  return {
+    signal: controller.signal,
+    reason: () => {
+      if (signal?.aborted) return signal.reason;
+      if (timedOut) return new ApiError(0, offlineMessage, { code: 'timeout' });
+      return null;
+    },
+    done: () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onCallerAbort);
+    },
+  };
 }

@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from './runner.js';
 import * as DPoP from 'dpop';
 import * as jose from 'jose';
+import { createServer } from 'node:http';
+import { ApiError, api as browserApi, configureAuth as configureBrowser } from '../browser/index.js';
 import { createDeviceKey, createDpopProof } from '../browser/device-key.js';
 import { memoryRateLimit } from '../server/rate-limits/memory.js';
 import { AuthError, configureAuth, statement } from '../server/index.js';
@@ -522,6 +524,68 @@ describe('rate limiting', () => {
     for (let i = 0; i < 6; i++) statuses.push((await api.login('admin', 'wrong-password', { ip })).status);
     expect(statuses.slice(0, 5)).toEqual([401, 401, 401, 401, 401]);
     expect(statuses[5]).toBe(429);
+  });
+});
+
+describe('browser api(): timeouts and cancellation', () => {
+  let stalled; // never answers
+  let halfBody; // sends headers and part of the body, then stalls
+
+  const listen = (handler) =>
+    new Promise((resolve) => {
+      const s = createServer(handler);
+      s.listen(0, '127.0.0.1', () => resolve(s));
+    });
+  const urlOf = (s) => `http://127.0.0.1:${s.address().port}`;
+  const failure = async (promise) => {
+    try {
+      await promise;
+      return 'resolved';
+    } catch (err) {
+      return err instanceof ApiError ? `ApiError ${err.status} ${err.details?.code}` : err.name;
+    }
+  };
+
+  beforeAll(async () => {
+    stalled = await listen(() => {});
+    halfBody = await listen((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.write('{"partial":');
+    });
+  });
+  afterAll(async () => {
+    configureBrowser({ apiUrl: '', requestTimeoutMs: 30_000 });
+    for (const s of [stalled, halfBody]) {
+      s.closeAllConnections();
+      await new Promise((resolve) => s.close(resolve));
+    }
+  });
+
+  test('a server that never answers times out as status 0 / timeout', async () => {
+    configureBrowser({ apiUrl: urlOf(stalled), requestTimeoutMs: 300 });
+    const started = Date.now();
+    expect(await failure(browserApi('/anything', { auth: false }))).toBe('ApiError 0 timeout');
+    expect(Date.now() - started < 3000).toBe(true);
+  });
+
+  test('a body that stalls halfway times out too (not an empty response)', async () => {
+    configureBrowser({ apiUrl: urlOf(halfBody), requestTimeoutMs: 300 });
+    expect(await failure(browserApi('/anything', { auth: false }))).toBe('ApiError 0 timeout');
+  });
+
+  test('the caller can cancel with a signal (AbortError, not a network error)', async () => {
+    configureBrowser({ apiUrl: urlOf(stalled), requestTimeoutMs: 30_000 });
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 100);
+    expect(await failure(browserApi('/anything', { auth: false, signal: controller.signal }))).toBe('AbortError');
+    const already = new AbortController();
+    already.abort();
+    expect(await failure(browserApi('/anything', { auth: false, signal: already.signal }))).toBe('AbortError');
+  });
+
+  test('normal answers are unaffected', async () => {
+    configureBrowser({ apiUrl: server.url, requestTimeoutMs: 5000 });
+    expect(await failure(browserApi('/auth/me', { auth: false }))).toBe('ApiError 401 undefined');
   });
 });
 

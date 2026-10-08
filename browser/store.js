@@ -38,6 +38,10 @@ function openAuthDb() {
       dbPromise = null;
       window.dispatchEvent(new CustomEvent('auth:outdated'));
     };
+    // The browser closed the connection (e.g. site data cleared): reopen on next use.
+    db.onclose = () => {
+      dbPromise = null;
+    };
     return db;
   });
   dbPromise.catch(() => {
@@ -46,16 +50,18 @@ function openAuthDb() {
   return dbPromise;
 }
 
-/** Runs `action(store)` in a transaction and resolves with its result once committed. */
+/**
+ * Runs `action(store)` in a transaction and resolves with the request's result once the
+ * transaction has committed. A failed request aborts the transaction; the promise then
+ * rejects with that request's error (one rejection, nothing left unhandled).
+ */
 async function withStore(mode, action) {
   const transaction = (await openAuthDb()).transaction(STORE, mode);
-  const result = done(action(transaction.objectStore(STORE)));
-  await new Promise((resolve, reject) => {
-    transaction.oncomplete = resolve;
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
+  const request = action(transaction.objectStore(STORE));
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve(request.result);
+    transaction.onabort = () => reject(request.error ?? transaction.error ?? new Error('IndexedDB transaction aborted'));
   });
-  return result;
 }
 
 async function read(key) {

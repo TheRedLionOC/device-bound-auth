@@ -15,6 +15,9 @@ const config = {
   storageName: 'app-auth',
   // Message of the ApiError thrown when the server cannot be reached (status 0).
   offlineMessage: 'Cannot reach the server',
+  // Give up on a request after this long (ms): ApiError status 0, details.code 'timeout'.
+  // Covers networks that stay connected but stop answering. null: no limit.
+  requestTimeoutMs: 30_000,
   // Deletes the project's local data. Called on logout, on a revoked session, and when
   // someone logs in whose data must not be mixed with the previous user's (sameScope).
   onReset: async () => {},
