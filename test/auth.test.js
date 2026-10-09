@@ -6,7 +6,17 @@ import { ApiError, api as browserApi, configureAuth as configureBrowser } from '
 import { createDeviceKey, createDpopProof } from '../browser/device-key.js';
 import { memoryRateLimit } from '../server/rate-limits/memory.js';
 import { AuthError, configureAuth, statement } from '../server/index.js';
-import { DATABASE_URL, RUNTIME, client, createDatabase, insertUser, newIp, startServer } from './harness.js';
+import {
+  DATABASE_URL,
+  RUNTIME,
+  client,
+  createDatabase,
+  insertUser,
+  newIp,
+  router,
+  startServer,
+  unexpectedErrors,
+} from './harness.js';
 
 const ADMIN_PASSWORD = 'Admin12345';
 const JWT_SECRET = 'test-secret-0123456789abcdef';
@@ -586,6 +596,95 @@ describe('browser api(): timeouts and cancellation', () => {
   test('normal answers are unaffected', async () => {
     configureBrowser({ apiUrl: server.url, requestTimeoutMs: 5000 });
     expect(await failure(browserApi('/auth/me', { auth: false }))).toBe('ApiError 401 undefined');
+  });
+});
+
+describe('createAuthRouter: secure by default', () => {
+  let user; // a session with the plain 'user' role
+  beforeAll(async () => {
+    const username = unique();
+    await api.call('/users', { method: 'POST', auth: admin, body: { username, name: 'Router user', password: 'Password1' } });
+    user = (await api.login(username, 'Password1')).auth;
+
+    router.get('/t/private', ({ user: who }) => Response.json({ username: who.username }));
+    router.get('/t/admin-only', () => Response.json({ ok: true }), { auth: 'admin' });
+    router.get('/t/typo-level', () => Response.json({ ok: true }), { auth: 'admn' });
+    router.get('/t/open', () => Response.json({ ok: true }), { auth: 'public' });
+    router.get('/t/files/:name', ({ params }) => Response.json(params), { auth: 'public' });
+    router.get('/t/status-error', () => {
+      throw Object.assign(new Error('Quantity must be positive'), { status: 422, details: { field: 'quantity' } });
+    }, { auth: 'public' });
+    router.get('/t/crash', () => {
+      throw new Error('secret internal detail');
+    }, { auth: 'public' });
+    router.get('/t/not-a-response', () => ({ ok: true }), { auth: 'public' });
+  });
+
+  test('a route that says nothing needs a session', async () => {
+    const anonymous = await api.call('/t/private');
+    expect(anonymous.status).toBe(401);
+    expect(Number(anonymous.headers.get('X-Server-Time')) > 0).toBe(true); // also on errors
+    const res = await api.call('/t/private', { auth: user });
+    expect(res.status).toBe(200);
+    expect(res.data.username.length > 0).toBe(true);
+  });
+
+  test('access levels: insufficient role is 403, a misspelled level stays closed', async () => {
+    expect((await api.call('/t/admin-only', { auth: user })).status).toBe(403);
+    expect((await api.call('/t/admin-only', { auth: admin })).status).toBe(200);
+    expect((await api.call('/t/typo-level', { auth: admin })).status).toBe(403);
+  });
+
+  test('public routes, 404 and 405', async () => {
+    expect((await api.call('/t/open')).status).toBe(200);
+    expect((await api.call('/t/nowhere')).status).toBe(404);
+    const wrongMethod = await api.call('/t/open', { method: 'DELETE' });
+    expect(wrongMethod.status).toBe(405);
+    expect(wrongMethod.headers.get('Allow')).toBe('GET');
+    const head = await fetch(`${server.url}/t/open`, { method: 'HEAD' });
+    expect(head.status).toBe(200);
+  });
+
+  test('route parameters cannot step out of a folder', async () => {
+    expect((await api.call('/t/files/report.txt')).data).toEqual({ name: 'report.txt' });
+    for (const bad of ['..', '%2E%2E', '.', 'a%2Fb', '..%2F..%2Fserver.js', 'a%5Cb']) {
+      expect(`${bad} ${(await api.call(`/t/files/${bad}`)).status}`).toBe(`${bad} 404`);
+    }
+    expect((await api.call('/t/files/%E0%A4%A')).status).toBe(400); // broken URL encoding
+  });
+
+  test('errors: own status kept as JSON, unexpected ones are a 500 without details', async () => {
+    const own = await api.call('/t/status-error');
+    expect(own.status).toBe(422);
+    expect(own.data).toEqual({ error: 'Quantity must be positive', details: { field: 'quantity' } });
+
+    const before = unexpectedErrors.length;
+    const crash = await api.call('/t/crash');
+    expect(crash.status).toBe(500);
+    expect(crash.data).toEqual({ error: 'Internal server error' });
+    expect(unexpectedErrors.length).toBe(before + 1);
+    expect(unexpectedErrors.at(-1).message).toBe('secret internal detail');
+
+    expect((await api.call('/t/not-a-response')).status).toBe(500);
+  });
+
+  test('CORS only for configured origins, with the DPoP headers', async () => {
+    const preflight = (origin) =>
+      fetch(`${server.url}/t/private`, {
+        method: 'OPTIONS',
+        headers: { Origin: origin, 'Access-Control-Request-Method': 'GET' },
+      });
+    const allowed = await preflight('https://allowed.example');
+    expect(allowed.status).toBe(204);
+    expect(allowed.headers.get('Access-Control-Allow-Origin')).toBe('https://allowed.example');
+    expect(allowed.headers.get('Access-Control-Allow-Headers').includes('DPoP')).toBe(true);
+    expect(allowed.headers.get('Access-Control-Expose-Headers')).toBe('X-Server-Time');
+
+    const other = await preflight('https://evil.example');
+    expect(other.headers.get('Access-Control-Allow-Origin')).toBe(null);
+
+    const res = await api.call('/t/private', { auth: user, headers: { Origin: 'https://allowed.example' } });
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBe('https://allowed.example');
   });
 });
 

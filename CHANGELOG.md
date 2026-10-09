@@ -4,6 +4,19 @@ All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org): a major version for breaking changes, a minor
 version for new options or features, a patch version for fixes.
 
+## 2.3.0 — 2026-10-08
+
+- `createAuthRouter()` (`device-bound-auth/server/auth-router`): a router with authentication
+  built in, secure by default. Routes need a session unless they say `auth: 'public'`; an
+  unknown access level refuses everyone; CORS for configured origins; 404 / 405 / `HEAD`;
+  route parameters with `/`, `\`, `.` or `..` are refused; errors become JSON (500s without
+  details, reported to `onError`); `X-Server-Time` on every response. The `/auth` and
+  `/users` routes are included. Works as `fetch` on Workers, Bun, Deno, and Node (with
+  `nodeHandler`). Projects with their own router keep using the separate pieces.
+- README: how to write your own database adapter (contract and a tested better-sqlite3
+  example).
+- Tests run through `createAuthRouter` and cover its security rules (48 tests).
+
 ## 2.2.0 — 2026-10-07
 
 - Browser: requests time out after `requestTimeoutMs` (default 30 s; `null` for no limit)

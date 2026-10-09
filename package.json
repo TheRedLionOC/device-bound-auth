@@ -1,6 +1,6 @@
 {
   "name": "device-bound-auth",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Username/password auth with device-bound sessions for an API and a browser app. Cloudflare Workers + D1, Bun or Node (SQLite, PostgreSQL, MySQL).",
   "license": "MIT",
   "author": "TheRedLionOC",
@@ -15,6 +15,7 @@
     "./server/adapters/pg": "./server/adapters/pg.js",
     "./server/adapters/mysql2": "./server/adapters/mysql2.js",
     "./server/http/node": "./server/http/node.js",
+    "./server/auth-router": "./server/auth-router.js",
     "./server/rate-limits/cloudflare": "./server/rate-limits/cloudflare.js",
     "./server/rate-limits/memory": "./server/rate-limits/memory.js",
     "./browser": "./browser/index.js",

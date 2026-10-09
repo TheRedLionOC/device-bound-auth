@@ -1,5 +1,5 @@
 /**
- * Test server: the server module behind a minimal router, on Bun.serve (Bun) or node:http
+ * Test server: the server module behind its own router (createAuthRouter), on Bun.serve (Bun) or node:http
  * through nodeHandler (Node), plus a client that signs requests with the browser module's
  * own signing code.
  *
@@ -10,16 +10,8 @@
  */
 import { readFileSync } from 'node:fs';
 import { createDeviceKey, createDpopProof } from '../browser/device-key.js';
-import {
-  AuthError,
-  authResponseHeaders,
-  authenticate,
-  hasAccess,
-  hashPassword,
-  registerAuthRoutes,
-  registerUserRoutes,
-  statement,
-} from '../server/index.js';
+import { createAuthRouter } from '../server/auth-router.js';
+import { hashPassword, statement } from '../server/index.js';
 import { isBun } from './runner.js';
 
 export const DATABASE_URL = process.env.DATABASE_URL ?? 'sqlite://:memory:';
@@ -105,65 +97,17 @@ export async function insertUser(db, { username, password, role = 'admin', itera
   return id;
 }
 
-/** Minimal router with the interface the module expects. */
-class Router {
-  routes = [];
-  add(method, path, handler, { auth = 'any' } = {}) {
-    this.routes.push({ method, parts: path.split('/').filter(Boolean), handler, auth });
-  }
-  get(path, handler, options) {
-    this.add('GET', path, handler, options);
-  }
-  post(path, handler, options) {
-    this.add('POST', path, handler, options);
-  }
-  put(path, handler, options) {
-    this.add('PUT', path, handler, options);
-  }
-  delete(path, handler, options) {
-    this.add('DELETE', path, handler, options);
-  }
-  match(method, pathname) {
-    const parts = pathname.split('/').filter(Boolean);
-    for (const route of this.routes) {
-      if (route.method !== method || route.parts.length !== parts.length) continue;
-      const params = {};
-      if (route.parts.every((p, i) => (p.startsWith(':') ? ((params[p.slice(1)] = parts[i]), true) : p === parts[i]))) {
-        return { route, params };
-      }
-    }
-    return {};
-  }
-}
+/**
+ * The module's own router (createAuthRouter), with its /auth and /users routes. Tests add
+ * routes to it. The client IP comes from the X-Test-IP header.
+ */
+export const unexpectedErrors = []; // what onError received (errors that became a 500)
+export const router = createAuthRouter({
+  cors: { origins: ['https://allowed.example'] },
+  onError: (err) => unexpectedErrors.push(err),
+});
 
-const router = new Router();
-registerAuthRoutes(router);
-registerUserRoutes(router);
-
-/** The fetch-style handler shared by both runtimes. The client IP comes from X-Test-IP. */
-async function handle(request) {
-  const env = { CLIENT_IP: request.headers.get('X-Test-IP') ?? '127.0.0.1' };
-  let response;
-  try {
-    const url = new URL(request.url);
-    const { route, params } = router.match(request.method, url.pathname);
-    if (!route) {
-      response = Response.json({ error: 'Not found' }, { status: 404 });
-    } else {
-      const context = { request, env, url, params, user: null, session: null };
-      if (route.auth !== 'public') {
-        Object.assign(context, await authenticate(request, env));
-        if (!hasAccess(context.user, route.auth)) throw new AuthError(403, 'Forbidden');
-      }
-      response = await route.handler(context);
-    }
-  } catch (err) {
-    if (!(err instanceof AuthError)) throw err;
-    response = Response.json({ error: err.message, details: err.details }, { status: err.status });
-  }
-  for (const [key, value] of Object.entries(authResponseHeaders())) response.headers.set(key, value);
-  return response;
-}
+const handle = (request) => router.fetch(request, { CLIENT_IP: request.headers.get('X-Test-IP') ?? '127.0.0.1' });
 
 /** Starts the server on a free port: Bun.serve, or node:http through nodeHandler. */
 export async function startServer() {

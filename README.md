@@ -14,7 +14,7 @@ Everything project-specific is an option of `configureAuth()`; only the database
 ## Install
 
 ```sh
-npm install github:TheRedLionOC/device-bound-auth#v2.2.0
+npm install github:TheRedLionOC/device-bound-auth#v2.3.0
 ```
 
 The server side is imported from your Worker or Bun code. The browser side is plain ES
@@ -53,20 +53,22 @@ time and import it from there.
 ### Server: Cloudflare Worker + D1
 
 ```js
+import { configureAuth } from 'device-bound-auth/server';
 import { d1Adapter } from 'device-bound-auth/server/adapters/d1';
+import { createAuthRouter } from 'device-bound-auth/server/auth-router';
 import { cloudflareRateLimit } from 'device-bound-auth/server/rate-limits/cloudflare';
-import {
-  AuthError, authResponseHeaders, authenticate, configureAuth, hasAccess,
-  registerAuthRoutes, registerUserRoutes,
-} from 'device-bound-auth/server';
 
 configureAuth({
   database: (env) => d1Adapter(env.DB),
   loginRateLimit: cloudflareRateLimit(), // optional; bindings in wrangler.jsonc
 });
 
-registerAuthRoutes(router);   // /auth/login, /register, /me, /refresh, /logout, /password
-registerUserRoutes(router);   // /users... (admin)
+// /auth/... and /users/... included. Every route needs a session unless it says 'public'.
+const router = createAuthRouter({ cors: { origins: ['https://app.example.com'] } });
+router.get('/items', ({ user, env }) => Response.json({ items: [] }));
+router.get('/health', () => Response.json({ ok: true }), { auth: 'public' });
+
+export default { fetch: router.fetch };
 ```
 
 - Tables: `schema/sqlite.sql` as a D1 migration (copy it into your `migrations/`).
@@ -133,15 +135,15 @@ configureAuth({
   passwords: { iterations: 600_000 },
 });
 
-// handle(request, env) is your fetch-style router (see "What the project's server must provide")
-createServer(nodeHandler((request, req) => handle(request, { CLIENT_IP: req.socket.remoteAddress })))
+const router = createAuthRouter(); // import { createAuthRouter } from 'device-bound-auth/server/auth-router'
+createServer(nodeHandler((request, req) => router.fetch(request, { CLIENT_IP: req.socket.remoteAddress })))
   .listen(3000);
 ```
 
 **Express:** mount it on a path, **before** `express.json()` or any body parser:
 
 ```js
-app.use('/api', nodeHandler((request, req) => handle(request, { CLIENT_IP: req.ip })));
+app.use('/api', nodeHandler((request, req) => router.fetch(request, { CLIENT_IP: req.ip })));
 app.use(express.json()); // your other routes
 ```
 
@@ -167,11 +169,50 @@ await login(username, password);
 const { users } = await api('/users');
 ```
 
-## What the project's server must provide
+## The router: `createAuthRouter()`
+
+`device-bound-auth/server/auth-router` is a router with authentication built in, **secure by
+default**: a route needs a session unless it says `{ auth: 'public' }`, and an access level
+that is misspelled or unknown refuses everyone. Use it unless the project has its own router.
+
+```js
+const router = createAuthRouter({
+  cors: { origins: ['https://app.example.com'] }, // omit when page and API share the origin
+  auth: { prefix: '/auth' },                      // or false to leave the login routes out
+  users: { prefix: '/users' },                    // or false to leave user administration out
+  onError: (err, { request }) => console.error(err), // errors that become a 500
+});
+
+router.get('/items/:id', ({ params, user, session, env, url, request, ctx }) => Response.json({}));
+router.post('/items', saveItem, { auth: 'staff' }); // an access level from configureAuth({ access })
+router.get('/health', health, { auth: 'public' });
+
+router.fetch(request, env, ctx); // Workers: export default { fetch: router.fetch }
+                                 // Bun: Bun.serve({ fetch: router.fetch })
+                                 // Node: createServer(nodeHandler((request, req) => router.fetch(request, env)))
+```
+
+For every request it:
+
+- answers CORS preflights and adds CORS headers only for the configured origins (allowing
+  the `DPoP` header and exposing `X-Server-Time`);
+- matches the route (404, or 405 with `Allow`); `HEAD` uses the `GET` route;
+- unless the route is public, authenticates (401) and checks the access level (403);
+- rejects route parameters containing `/`, `\`, `.` or `..` (also URL-encoded), so a handler
+  that builds a file path from one cannot leave its folder;
+- turns errors into JSON `{ error, details }`: an error with a numeric `status` (such as
+  `AuthError`, or the project's own) keeps it; anything else is a 500 without details, and
+  the error goes to `onError`;
+- adds `X-Server-Time` to every response, errors included.
+
+## Using your own router instead
+
+With Hono, Express or a router of its own, the project wires the pieces itself:
 
 1. **A router** with `get/post/put/delete(path, handler, { auth })`. `auth` is `'public'`
    or an access level (default `'any'`). Handlers receive
-   `{ request, env, params, user, session }` and return a `Response`.
+   `{ request, env, params, user, session }` and return a `Response`. Register the module's
+   routes with `registerAuthRoutes(router, { prefix })` and `registerUserRoutes(router, { prefix })`.
 2. **Authentication per route**, before calling the handler:
    ```js
    if (route.auth !== 'public') {
@@ -190,7 +231,7 @@ const { users } = await api('/users');
 
 | Option | Default | |
 | --- | --- | --- |
-| `database` | — (required) | `(env) => adapter`: `d1Adapter(env.DB)`, `bunSqlAdapter(sql)`, `nodeSqliteAdapter(db)`, `pgAdapter(pool)` or `mysql2Adapter(pool)` |
+| `database` | — (required) | `(env) => adapter`: `d1Adapter(env.DB)`, `bunSqlAdapter(sql)`, `nodeSqliteAdapter(db)`, `pgAdapter(pool)`, `mysql2Adapter(pool)` or your own (see **Writing your own database adapter**) |
 | `jwtSecret` | `(env) => env.JWT_SECRET` | Changing the secret logs everyone out |
 | `loginRateLimit` | `null` (no limit) | `cloudflareRateLimit()`, `memoryRateLimit()` or your own `async ({ request, env, username }) => {}` that throws |
 | `roles` | `['admin', 'user']` | First one is the default for new users |
@@ -250,6 +291,62 @@ For projects whose users own other records (e.g. a stock location per user):
 
 Statements are plain data, built with `statement(sql, ...params)` exported by the module,
 with `?` placeholders and portable SQL, so hooks work with any adapter.
+
+### Writing your own database adapter
+
+The included adapters cover Cloudflare D1, Bun.SQL, `node:sqlite`, `pg` and `mysql2`. For
+another driver, write an adapter: an object with four functions. The module never sees
+the driver; every query reaches the adapter as plain data, `{ sql, params }`.
+
+| Function | Receives | Must return |
+| --- | --- | --- |
+| `first(statement)` | `{ sql, params }` | The first row as a plain object, or `null` when there is none (not `undefined`) |
+| `all(statement)` | `{ sql, params }` | An array of rows (empty when there are none) |
+| `run(statement)` | `{ sql, params }` | Anything; it runs a write |
+| `batch(statements)` | An array of `{ sql, params }` | Runs them **in one transaction**: if any fails, none is kept, and the error is thrown |
+
+All four may return promises. Things to get right:
+
+- **`batch` must be atomic.** User changes, the project's hook statements and session
+  revocations go together; partial writes would leave them out of step. With a connection
+  pool, run the whole batch on one connection taken from the pool (see `adapters/pg.js`).
+- **Placeholders are `?`, in order.** If the database numbers them (`$1, $2...` in
+  PostgreSQL), convert them; the module's SQL never has a `?` inside a quoted string.
+- **Values are strings, numbers or `null`.** Timestamps are milliseconds since epoch. If the
+  driver returns `BIGINT` columns as strings, nothing to do: the module converts its own
+  timestamp columns.
+- **A duplicate username must throw** an error whose message mentions both `unique` or
+  `duplicate` and `username` (the drivers' default messages do); the module turns it into a
+  409.
+- **Create the client once** at startup and share it with the rest of the app, so both use
+  the same connections (see `schema/` for the tables).
+
+Example for [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) (synchronous
+SQLite for Node):
+
+```js
+import Database from 'better-sqlite3';
+import { configureAuth } from 'device-bound-auth/server';
+
+export function betterSqliteAdapter(db) {
+  const runAll = db.transaction((statements) => {
+    for (const { sql, params } of statements) db.prepare(sql).run(...params);
+  });
+  return {
+    first: async ({ sql, params }) => db.prepare(sql).get(...params) ?? null,
+    all: async ({ sql, params }) => db.prepare(sql).all(...params),
+    run: async ({ sql, params }) => db.prepare(sql).run(...params),
+    batch: async (statements) => runAll(statements), // one transaction: all or nothing
+  };
+}
+
+const db = betterSqliteAdapter(new Database('data/app.db')); // once, at startup
+configureAuth({ database: () => db });
+```
+
+To check an adapter, make `createDatabase()` in `test/harness.js` return it and run
+`npm run test:node`: the suite (login, sessions, user administration, duplicate usernames)
+exercises all four functions, including a failing batch.
 
 ## Browser options: `configureAuth()`
 

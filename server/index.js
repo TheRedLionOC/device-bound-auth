@@ -8,6 +8,7 @@
  *   Core (any JavaScript runtime with Web Crypto): the files in this folder
  *   adapters/      database adapters, pick one: d1.js (Cloudflare D1), bun-sql.js (Bun.SQL:
  *                  sqlite://, postgres://, mysql://), node-sqlite.js, pg.js, mysql2.js (Node)
+ *   auth-router.js createAuthRouter(): a router with authentication built in, secure by default
  *   http/node.js   runs the fetch-style handlers on node:http or Express
  *   rate-limits/   optional login limits: cloudflare.js (Workers binding), memory.js
  *                  (single long-running server)
